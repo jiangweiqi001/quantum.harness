@@ -51,14 +51,9 @@
 \setbeamerfont{subsection in toc}{family=\sffamily, size=\normalsize}
 
 % --- Theorem environments ---
-% Reusing Beamer's block infrastructure
-\newtheorem{theorem}{Theorem}
-\newtheorem{lemma}[theorem]{Lemma}
-\newtheorem{corollary}[theorem]{Corollary}
-\theoremstyle{definition}
-\newtheorem{definition}{Definition}
-\theoremstyle{remark}
-\newtheorem{remark}{Remark}
+% Beamer already provides theorem, lemma, corollary, definition,
+% remark, example, proof environments by default. We override their
+% styles via block templates in beamercolorthemeAcademic.sty.
 
 % Proof environment with gold accent
 \newenvironment{proofblock}[1][\proofname]{%
