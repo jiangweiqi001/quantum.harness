@@ -243,7 +243,7 @@
   \newcommand{\@affiliation}{}
   \let\oldauthor\author
   \renewcommand{\author}[2][]{%
-    \oldauthor{#2\\\small\textcolor{gray}{#1}}%
+    \oldauthor{#2\ifx\@empty#1\@empty\else\\\small\textcolor{gray}{#1}\fi}%
   }
 \fi
 
