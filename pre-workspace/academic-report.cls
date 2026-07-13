@@ -1,5 +1,5 @@
 % academic-report.cls — Custom class for physics/math academic reports
-% Options: paper (default), assignment
+% Options: papermode (default), assignment
 \NeedsTeXFormat{LaTeX2e}
 \ProvidesClass{academic-report}[2026/07/13 v1.0 Academic Report Class]
 
@@ -7,9 +7,9 @@
 \newif\if@assignment
 \@assignmentfalse
 \DeclareOption{assignment}{\@assignmenttrue}
-\DeclareOption{paper}{\@assignmentfalse}
+\DeclareOption{papermode}{\@assignmentfalse}
 \DeclareOption*{\PassOptionsToClass{\CurrentOption}{article}}
-\ExecuteOptions{paper}
+\ExecuteOptions{papermode}
 \ProcessOptions\relax
 
 % --- Base class ---
@@ -21,6 +21,8 @@
 \RequirePackage{lmodern}              % Latin Modern fonts
 \RequirePackage{amsmath,amsthm,amssymb}
 \RequirePackage[margin=1in]{geometry}
+\setlength{\headheight}{33.5pt}
+\addtolength{\topmargin}{-21.5pt}
 \RequirePackage{fancyhdr}
 \RequirePackage[svgnames,dvipsnames]{xcolor}
 \RequirePackage{titlesec}
@@ -30,7 +32,8 @@
   style=authoryear,
   sorting=nyt,
   maxbibnames=99,
-  giveninits=true
+  giveninits=true,
+  uniquename=init
 ]{biblatex}
 \RequirePackage[colorlinks=true,linkcolor=accent,citecolor=accent,urlcolor=accent]{hyperref}
 \RequirePackage[font={small,color=primary}]{caption}
