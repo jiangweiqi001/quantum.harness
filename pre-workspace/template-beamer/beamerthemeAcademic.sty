@@ -1,0 +1,41 @@
+% beamerthemeAcademic.sty — Main Academic Beamer theme
+% Load with: \usetheme{Academic}
+\mode<presentation>
+
+% --- Load sub-themes ---
+\usecolortheme{Academic}
+\usefonttheme{Academic}
+\useoutertheme{Academic}
+\useinnertheme{Academic}
+
+% --- Code listings (matching paper template) ---
+\RequirePackage{listings}
+\lstset{
+  language=Python,
+  backgroundcolor=\color{paleGold},
+  basicstyle=\ttfamily\footnotesize\color{primary},
+  keywordstyle=\color{primary}\bfseries,
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{accent},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=6pt,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{accent},
+  breaklines=true,
+  tabsize=2,
+  showstringspaces=false,
+  captionpos=b,
+}
+
+% --- Table of contents at each section start ---
+\AtBeginSection[]
+{
+  \begin{frame}<beamer>[plain]
+    \frametitle{Outline}
+    \tableofcontents[currentsection]
+  \end{frame}
+}
+
+\mode<all>
