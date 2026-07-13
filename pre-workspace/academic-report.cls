@@ -192,4 +192,126 @@
 
 % --- Equation numbering per section ---
 \numberwithin{equation}{section}
+
+% --- Title block ---
+\renewcommand{\maketitle}{%
+  \begin{center}
+    % Top navy rule
+    \rule{\textwidth}{1.5pt}\\[0.3em]
+    % Gold accent line (shorter)
+    {\color{accent}\rule{0.6\textwidth}{0.8pt}}\\[1em]
+    % Title
+    {\sffamily\LARGE\bfseries\color{primary}\@title\\[0.5em]}
+    % Author
+    {\large\color{bodyText}\@author\\[0.3em]}
+    % Date
+    {\footnotesize\color{gray}\@date}
+    \\[0.5em]
+    % Bottom navy rule
+    \rule{\textwidth}{0.4pt}
+  \end{center}
+  \vspace{1em}
+}
+
+% --- Paper mode features ---
+\if@assignment\else
+  % Abstract environment: pale gold background, navy left border
+  \newtcolorbox{abstractblock}{
+    enhanced,
+    breakable,
+    colback=paleGold,
+    colframe=primary,
+    boxrule=0.4pt,
+    left=4mm,
+    right=2mm,
+    top=2mm,
+    bottom=2mm,
+    sharp corners,
+    borderline west={3pt}{0pt}{accent},
+    before skip=12pt,
+    after skip=12pt,
+  }
+  \renewenvironment{abstract}
+    {\begin{abstractblock}\textbf{\sffamily\color{primary}Abstract.}\quad}
+    {\end{abstractblock}}
+
+  % Author/affiliation commands
+  \newcommand{\affiliation}[1]{\gdef\@affiliation{#1}}
+  \newcommand{\@affiliation}{}
+  \let\oldauthor\author
+  \renewcommand{\author}[2][]{%
+    \oldauthor{#2\\\small\textcolor{gray}{#1}}%
+  }
+\fi
+
+% --- Assignment mode features ---
+\if@assignment
+  % Course metadata
+  \newcommand{\course}[1]{\gdef\@course{#1}}
+  \newcommand{\@course}{}
+  \newcommand{\instructor}[1]{\gdef\@instructor{#1}}
+  \newcommand{\@instructor}{}
+  \newcommand{\duedate}[1]{\gdef\@duedate{#1}}
+  \newcommand{\@duedate}{}
+
+  % Submission info box
+  \newcommand{\submissioninfo}{%
+    \ifx\@course\@empty\else
+      \begin{tcolorbox}[
+        enhanced,
+        colback=iceBlue,
+        colframe=primary,
+        boxrule=0.4pt,
+        sharp corners,
+        before skip=8pt,
+        after skip=12pt,
+      ]
+        \sffamily\small\color{primary}
+        \begin{tabular}{@{}ll}
+          \textbf{Course:} & \@course \\
+          \textbf{Instructor:} & \@instructor \\
+          \textbf{Due Date:} & \@duedate \\
+        \end{tabular}
+      \end{tcolorbox}
+    \fi
+  }
+
+  % Redefine maketitle for assignments to include submission info
+  \let\oldmaketitle\maketitle
+  \renewcommand{\maketitle}{%
+    \oldmaketitle
+    \submissioninfo
+  }
+
+  % Problem environment (numbered)
+  \newcounter{problem}[section]
+  \renewcommand{\theproblem}{\arabic{section}.\arabic{problem}}
+  \newenvironment{problem}[1][]
+    {\refstepcounter{problem}%
+     \vspace{10pt}%
+     \noindent\textbf{\sffamily\color{primary}Problem \theproblem.}%
+     \ifx#1\empty\else\ \textit{#1}\fi%
+     \par\vspace{4pt}}
+    {\vspace{4pt}}
+
+  % Solution environment (ice-blue shaded)
+  \newtcolorbox{solutionblock}{
+    enhanced,
+    breakable,
+    colback=iceBlue,
+    colframe=primary,
+    boxrule=0.4pt,
+    left=4mm,
+    right=2mm,
+    top=2mm,
+    bottom=2mm,
+    sharp corners,
+    borderline west={3pt}{0pt}{accent},
+    before skip=8pt,
+    after skip=8pt,
+  }
+  \newenvironment{solution}
+    {\begin{solutionblock}\textbf{\sffamily\color{primary}Solution.}\quad}
+    {\end{solutionblock}}
+\fi
 \endinput
