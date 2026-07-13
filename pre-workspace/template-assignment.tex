@@ -1,0 +1,135 @@
+% template-assignment.tex --- Example assignment using academic-report class
+\documentclass[assignment]{academic-report}
+
+% --- Metadata ---
+\title{Problem Set 3: Entanglement Measures}
+\author{Student Name}
+\date{\today}
+
+% --- Course Info ---
+\course{PHYS 641: Advanced Quantum Mechanics}
+\instructor{Prof. S. Chen}
+\duedate{October 15, 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Entanglement Entropy of Bipartite Systems}
+
+\begin{problem}[Entanglement entropy of a two-spin system]
+Consider two spin-$\frac{1}{2}$ particles in the singlet state:
+\begin{equation}
+  |\psi\rangle = \frac{1}{\sqrt{2}}\left(|\uparrow\downarrow\rangle -
+  |\downarrow\uparrow\rangle\right)
+\end{equation}
+Compute the entanglement entropy of one spin by tracing out the other.
+\end{problem}
+
+\begin{solution}
+The density matrix of the full system is:
+\begin{equation}
+  \rho = |\psi\rangle\langle\psi| =
+  \frac{1}{2}\left(|\uparrow\downarrow\rangle\langle\uparrow\downarrow| +
+  |\downarrow\uparrow\rangle\langle\downarrow\uparrow| -
+  |\uparrow\downarrow\rangle\langle\downarrow\uparrow| -
+  |\downarrow\uparrow\rangle\langle\uparrow\downarrow|\right)
+\end{equation}
+
+Tracing out the second spin yields the reduced density matrix:
+\begin{equation}
+  \rho_A = \mathrm{Tr}_B(\rho) =
+  \frac{1}{2}\left(|\uparrow\rangle\langle\uparrow| +
+  |\downarrow\rangle\langle\downarrow|\right) =
+  \begin{pmatrix} \frac{1}{2} & 0 \\ 0 & \frac{1}{2} \end{pmatrix}
+\end{equation}
+
+The entanglement entropy is:
+\begin{equation}
+  S_A = -\mathrm{Tr}(\rho_A \ln \rho_A) =
+  -2 \cdot \frac{1}{2}\ln\frac{1}{2} = \ln 2
+\end{equation}
+
+This is the maximum possible entanglement for a two-qubit system.
+\end{solution}
+
+\begin{problem}[Area law in the AKLT chain]
+The Affleck-Kennedy-Lieb-Tasaki (AKLT) chain has the following Hamiltonian:
+\begin{equation}
+  H = \sum_i \left[\mathbf{S}_i \cdot \mathbf{S}_{i+1} +
+  \frac{1}{3}(\mathbf{S}_i \cdot \mathbf{S}_{i+1})^2\right]
+\end{equation}
+
+Using the matrix product state representation, argue that the ground state
+entanglement entropy saturates to a constant $S = 2\ln 2$ for large block
+sizes, consistent with the area law in one dimension.
+\end{problem}
+
+\begin{solution}
+The AKLT ground state can be written as an MPS with bond dimension $\chi = 2$.
+The virtual space at each bond encodes a spin-$\frac{1}{2}$ degree of freedom,
+so the Schmidt decomposition at any cut has exactly two non-zero singular
+values $\lambda_1 = \lambda_2 = 1/\sqrt{2}$.
+
+For a block of length $L$, the entanglement entropy is bounded by:
+\begin{equation}
+  S_A(L) \leq \ln(\chi^2) = \ln 4 = 2\ln 2
+\end{equation}
+
+For large $L$, this bound is saturated. Since the entropy is independent of
+block length, it satisfies the one-dimensional area law: $S_A \sim \text{const}$
+for gapped systems.
+\end{solution}
+
+\section{Computational Methods}
+
+\begin{problem}[Numerical entanglement spectrum]
+Write a short program to compute the entanglement spectrum of the transverse
+field Ising model at criticality. The Hamiltonian is:
+\begin{equation}
+  H = -J\sum_i \left(\sigma_i^z \sigma_{i+1}^z + g\sigma_i^x\right)
+\end{equation}
+with $g = 1$ at the critical point.
+\end{problem}
+
+\begin{solution}
+The following code uses exact diagonalization for a small chain:
+
+\begin{lstlisting}[language=Python, caption={Exact diagonalization of TFI model}]
+import numpy as np
+from scipy.linalg import eigh
+
+def tfi_hamiltonian(N, J=1.0, g=1.0):
+    """Build the transverse field Ising Hamiltonian."""
+    dim = 2**N
+    H = np.zeros((dim, dim))
+
+    for i in range(N):
+        j = (i + 1) % N
+        # sigma^z_i sigma^z_{j+1}
+        for s in range(dim):
+            spin_i = (s >> i) & 1
+            spin_j = (s >> j) & 1
+            H[s, s] += -J * (1 - 2*spin_i) * (1 - 2*spin_j)
+        # g * sigma^x_i
+        for s in range(dim):
+            s_flip = s ^ (1 << i)
+            H[s, s_flip] += -J * g
+
+    return H
+
+N = 10
+H = tfi_hamiltonian(N, g=1.0)
+energies, states = eigh(H)
+
+# Ground state
+psi_0 = states[:, 0]
+print(f"Ground state energy: {energies[0]:.6f}")
+print(f"Energy gap: {energies[1] - energies[0]:.6f}")
+\end{lstlisting}
+
+The entanglement spectrum can then be obtained by reshaping the ground state
+vector into a matrix and performing SVD.
+\end{solution}
+
+\end{document}
