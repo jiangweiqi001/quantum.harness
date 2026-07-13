@@ -1,0 +1,163 @@
+% template-beamer.tex — Example presentation using Academic Beamer theme
+\documentclass[aspectratio=169]{beamer}
+
+% --- Theme ---
+\usetheme{Academic}
+
+% --- Metadata ---
+\title{Quantum Many-Body Systems:\\Emergent Phenomena and Entanglement}
+\subtitle{A Tensor Network Perspective}
+\author{Author Name}
+\institute{Department of Physics\\University of Example}
+\date{\today}
+
+\begin{document}
+
+% --- Title Slide ---
+\begin{frame}
+  \titlepage
+\end{frame}
+
+% --- Outline ---
+\begin{frame}{Outline}
+  \tableofcontents
+\end{frame}
+
+% --- Section 1 ---
+\section{Introduction}
+
+\begin{frame}{Motivation}
+  \begin{columns}
+    \column{0.5\textwidth}
+    \begin{itemize}
+      \item Strongly correlated electrons exhibit rich emergent phenomena
+      \item Collective behavior challenges theoretical understanding
+      \item Entanglement provides organizing principle
+      \begin{itemize}
+        \item Area law for gapped systems
+        \item Logarithmic violations at criticality
+        \item Topological entanglement entropy
+      \end{itemize}
+    \end{itemize}
+
+    \column{0.5\textwidth}
+    \begin{block}{Key Questions}
+      \begin{enumerate}
+        \item How does entanglement classify quantum phases?
+        \item Can tensor networks capture the relevant physics?
+        \item What is the role of symmetry?
+      \end{enumerate}
+    \end{block}
+  \end{columns}
+\end{frame}
+
+% --- Section 2 ---
+\section{Tensor Network Methods}
+
+\begin{frame}{Matrix Product States}
+  A matrix product state (MPS) for $N$ sites:
+  \begin{equation}
+    |\psi\rangle = \sum_{\{s_i\}} \mathrm{Tr}\left[A_1^{s_1} A_2^{s_2}
+    \cdots A_N^{s_N}\right] |s_1 s_2 \cdots s_N\rangle
+    \label{eq:mps}
+  \end{equation}
+
+  \begin{definition}
+    The \textbf{bond dimension} $\chi$ controls the amount of entanglement
+    captured by the MPS ansatz. For area-law states, $\chi$ is
+    independent of system size.
+  \end{definition}
+
+  \begin{theorem}[Area Law]
+    For gapped local Hamiltonians in $d$ dimensions, the ground state
+    entanglement entropy satisfies:
+    \begin{equation}
+      S_A = \alpha\cdot\mathrm{Area}(\partial A) + \cdots
+    \end{equation}
+  \end{theorem}
+\end{frame}
+
+\begin{frame}{Entanglement Spectrum}
+  \begin{proofblock}[Proof Sketch]
+    The ground state projector can be expressed via a contour integral:
+    \begin{equation}
+      |\psi_0\rangle\langle\psi_0| =
+      \frac{1}{2\pi i} \oint_\Gamma \frac{dz}{z - H}
+    \end{equation}
+    where $\Gamma$ encircles the ground state energy.
+  \end{proofblock}
+
+  \begin{alertblock}{Important}
+    The area law is violated in gapless 1D systems (log violation)
+    and systems with Fermi surfaces.
+  \end{alertblock}
+\end{frame}
+
+% --- Section 3 ---
+\section{Applications}
+
+\begin{frame}{Topological Order}
+  \begin{exampleblock}{Topological Entanglement Entropy}
+    For topologically ordered phases:
+    \begin{equation}
+      S_A = \alpha L - \gamma + O(L^{-1})
+    \end{equation}
+    where $\gamma = \ln\mathcal{D}$ is the \textbf{topological
+    entanglement entropy} and $\mathcal{D}$ is the total quantum
+    dimension.
+  \end{exampleblock}
+
+  \begin{corollary}
+    The classification of gapped quantum phases in 2D reduces to the
+    classification of modular tensor categories.
+  \end{corollary}
+\end{frame}
+
+\begin{frame}[fragile]{Code Example: DMRG Algorithm}
+  \begin{lstlisting}[caption={Single-site DMRG sweep}]
+import numpy as np
+
+def dmrg_sweep(H_mpo, mps, max_bond_dim=100):
+    """Perform one DMRG sweep (left-to-right)."""
+    for site in range(len(mps)):
+        # Contract effective Hamiltonian
+        H_eff = contract_environment(H_mpo, mps, site)
+
+        # Solve local eigenvalue problem
+        energy, psi = np.linalg.eigh(H_eff)
+
+        # Truncate to max_bond_dim
+        mps[site] = truncate(psi[:, 0], max_bond_dim)
+
+    return mps, energy[0]
+  \end{lstlisting}
+\end{frame}
+
+% --- Section 4 ---
+\section{Conclusions}
+
+\begin{frame}{Summary}
+  \begin{itemize}
+    \item Entanglement is a powerful organizing principle for
+          quantum many-body systems
+    \item Tensor networks provide efficient representations
+          for area-law states
+    \item Topological order manifests in universal subleading
+          contributions to entanglement entropy
+    \item DMRG and related algorithms enable precision numerics
+  \end{itemize}
+
+  \vspace{1em}
+  \begin{block}{Outlook}
+    \begin{itemize}
+      \item Extend to higher dimensions (PEPS)
+      \item Real-time dynamics and thermalization
+      \item Connections to holography and AdS/CFT
+    \end{itemize}
+  \end{block}
+\end{frame}
+
+% --- Thank You ---
+\thankyoupage
+
+\end{document}
