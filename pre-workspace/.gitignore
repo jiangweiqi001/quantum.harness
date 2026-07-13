@@ -5,6 +5,9 @@
 *.bbl
 *.bcf
 *.blg
+*.nav
+*.snm
+*.vrb
 *.run.xml
 *.synctex.gz
 *.fls
