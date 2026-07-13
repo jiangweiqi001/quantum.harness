@@ -82,7 +82,7 @@
   {\thesection}
   {1em}
   {}
-  [\vspace{-0.6em}\rule{\textwidth}{0.8pt}\color{accent}]
+  [\vspace{-0.6em}{\color{accent}\rule{\textwidth}{0.8pt}}]
 
 % Subsection: navy sans-serif, no rule
 \titleformat{\subsection}
@@ -192,3 +192,4 @@
 
 % --- Equation numbering per section ---
 \numberwithin{equation}{section}
+\endinput
