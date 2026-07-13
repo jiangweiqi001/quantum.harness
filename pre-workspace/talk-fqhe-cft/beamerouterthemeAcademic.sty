@@ -1,0 +1,74 @@
+% beamerouterthemeAcademic.sty — Outer elements for Academic Beamer theme
+\mode<presentation>
+
+% --- Margins ---
+\setbeamersize{text margin left=12pt, text margin right=12pt}
+
+% --- Headline: Copenhagen-style navigation bar ---
+\defbeamertemplate*{headline}{Academic theme}
+{%
+  \leavevmode
+  \hbox{%
+    \begin{beamercolorbox}[wd=\paperwidth, ht=3.5ex, dp=1.5ex]{palette primary}%
+      \usebeamerfont{section in head/foot}%
+      \insertsectionnavigationhorizontal{\paperwidth}{%
+        \hskip0.3ex plus1fill
+      }{%
+        \hskip0.3ex plus1fill
+      }%
+    \end{beamercolorbox}%
+  }%
+  \hbox{%
+    \begin{beamercolorbox}[wd=\paperwidth, ht=2.0ex, dp=0.5ex]{palette primary}%
+      \usebeamerfont{subsection in head/foot}%
+      \insertsubsectionnavigationhorizontal{\paperwidth}{%
+        \hskip0.3ex plus1fill
+      }{%
+        \hskip0.3ex plus1fill
+      }%
+    \end{beamercolorbox}%
+  }%
+  \vskip0pt
+}
+
+% --- Footline: title | author | date ---
+\defbeamertemplate*{footline}{Academic theme}
+{%
+  \leavevmode
+  \hbox{%
+    \begin{beamercolorbox}[wd=.33\paperwidth, ht=2.5ex, dp=1ex, left]{footline}%
+      \usebeamerfont{footline}%
+      \hspace*{8pt}\insertshorttitle
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=.34\paperwidth, ht=2.5ex, dp=1ex, center]{footline}%
+      \usebeamerfont{footline}%
+      \insertshortauthor
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=.33\paperwidth, ht=2.5ex, dp=1ex, right]{footline}%
+      \usebeamerfont{footline}%
+      \insertshortdate\hspace*{8pt}
+    \end{beamercolorbox}%
+  }%
+  \vskip0pt
+}
+
+% --- Frametitle ---
+\defbeamertemplate*{frametitle}{Academic theme}
+{%
+  \vspace*{4pt}%
+  \ifbeamercolorempty[bg]{frametitle}{}{\nointerlineskip}%
+  \begin{beamercolorbox}[wd=\paperwidth, leftskip=8pt, rightskip=8pt, ht=2.25ex, dp=1ex]{frametitle}%
+    \usebeamerfont{frametitle}\insertframetitle%
+    \ifx\insertframesubtitle\@empty\else%
+      \\[4pt]{\usebeamerfont{framesubtitle}\insertframesubtitle}%
+    \fi
+  \end{beamercolorbox}%
+  \vspace{-6pt}%
+  {\color{accent}\hspace*{8pt}\rule{0.96\paperwidth}{0.6pt}}%
+  \vspace{6pt}%
+}
+
+% --- Disable navigation symbols ---
+\setbeamertemplate{navigation symbols}{}
+
+\mode<all>

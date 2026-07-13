@@ -1,0 +1,426 @@
+% talk-fqhe-cft.tex — From FQHE to Fuzzy Sphere Numerical CFT
+% 8-minute Beamer talk, ~9 slides
+\documentclass[aspectratio=169]{beamer}
+
+\usetheme{Academic}
+
+% --- Metadata ---
+\title{From FQHE to Fuzzy Sphere Numerical CFT}
+\subtitle{Landau Levels as a Regulator for 3D Criticality}
+\author{Author Name}
+\institute{Department of Physics\\University of Example}
+\date{\today}
+
+\begin{document}
+
+% ===================================================================
+% Slide 1: Title
+% ===================================================================
+\begin{frame}[plain]
+  \titlepage
+
+  \vspace{-2em}
+  \begin{center}
+    \begin{tikzpicture}[scale=0.7]
+      % Sphere
+      \shade[ball color=primary!30, opacity=0.6] (0,0) circle (1.5);
+      \draw[primary, thick] (0,0) circle (1.5);
+      % Monopole field lines
+      \foreach \a in {0,45,...,315} {
+        \draw[accent, ->, thick] ({1.7*cos(\a)},{1.7*sin(\a)}) -- ({1.2*cos(\a)},{1.2*sin(\a)});
+      }
+      % Orbital ring
+      \draw[primary!70, thick, dashed] (0,0) circle (1.0);
+      \node[primary] at (0,0.25) {\small$2S$};
+      \node[primary] at (0,-1.7) {\footnotesize monopole flux};
+    \end{tikzpicture}
+  \end{center}
+\end{frame}
+
+% ===================================================================
+% Slide 2: Haldane Sphere in FQHE
+% ===================================================================
+\section{Starting Point: Haldane Sphere}
+
+\begin{frame}{Haldane Sphere in FQHE}
+  \begin{columns}
+    \column{0.55\textwidth}
+    \begin{itemize}
+      \item Particles on $S^2$ with magnetic monopole flux $2S$
+      \item Lowest Landau level: $\dim\mathcal{H}_{\mathrm{LLL}} = 2S + 1$
+      \item Single-particle basis forms spin-$S$ rep of $\mathrm{SO}(3)$
+    \end{itemize}
+
+    \vspace{1em}
+    \begin{equation}
+      m = -S, \dots, S \qquad \dim = N_\phi + 1 = 2S + 1
+    \end{equation}
+
+    \begin{block}{Key message}
+      The sphere gives a \textbf{finite}, \textbf{rotationally symmetric}
+      Hilbert space.
+    \end{block}
+
+    \column{0.45\textwidth}
+    \centering
+    \begin{tikzpicture}[scale=0.85]
+      \shade[ball color=primary!25, opacity=0.5] (0,0) circle (1.5);
+      \draw[primary, thick] (0,0) circle (1.5);
+      % North and south poles
+      \fill[accent] (0,1.5) circle (0.08) node[right] {$+S$};
+      \fill[accent] (0,-1.5) circle (0.08) node[right] {$-S$};
+      % Orbital lines
+      \draw[primary!50, dashed] (0,0) circle (0.5);
+      \draw[primary!50, dashed] (0,0) circle (1.0);
+      % Equator
+      \draw[accent, thick, dashed] (0,0) ellipse (1.5 and 0.4);
+      \node[accent, font=\footnotesize] at (1.6,-0.5) {$m=0$};
+      % Monopole
+      \fill[primary] (0,0) circle (0.12);
+      \foreach \a in {0,60,...,300} {
+        \draw[primary!60, ->] (0,0) -- ({0.6*cos(\a)},{0.6*sin(\a)});
+      }
+    \end{tikzpicture}
+  \end{columns}
+\end{frame}
+
+% ===================================================================
+% Slide 3: LLL Projection → Fuzzy Geometry
+% ===================================================================
+\section{LLL Projection → Fuzzy Geometry}
+
+\begin{frame}{LLL Projection $\longrightarrow$ Fuzzy Sphere}
+  \begin{itemize}
+    \item After LLL projection, kinetic energy is \textbf{quenched}
+    \item Coordinates no longer commute under projection
+    \item Finite matrix algebra approximates functions on $S^2$
+  \end{itemize}
+
+  \begin{equation}
+    [X_i, X_j] \sim \frac{i}{\sqrt{S(S+1)}}\, \epsilon_{ijk} X_k
+  \end{equation}
+
+  \begin{center}
+    \begin{tikzpicture}[scale=0.85]
+      % Left: classical sphere
+      \draw[primary, thick] (-3,0) circle (1.2);
+      \node[primary, font=\small\bfseries] at (-3,-1.7) {Classical $S^2$};
+      \node[font=\footnotesize] at (-3,-2.2) {commuting coords};
+
+      % Arrow
+      \draw[->, accent, line width=1.5pt] (-1.5,0) -- (1.5,0);
+      \node[accent, font=\small] at (0,0.5) {LLL projection};
+
+      % Right: fuzzy sphere
+      \shade[ball color=primary!15, opacity=0.4] (3,0) circle (1.2);
+      \draw[primary, thick, dashed] (3,0) circle (1.2);
+      % Matrix grid
+      \foreach \x in {2.2,2.6,...,3.8} {
+        \foreach \y in {-0.8,-0.4,...,0.8} {
+          \fill[accent!60] (\x,\y) circle (0.04);
+        }
+      }
+      \node[primary, font=\small\bfseries] at (3,-1.7) {Fuzzy $S^2$};
+      \node[font=\footnotesize] at (3,-2.2) {matrix algebra};
+    \end{tikzpicture}
+  \end{center}
+
+  \begin{block}{Key message}
+    Geometry is encoded by \textbf{finite matrices}.
+    The sphere becomes ``fuzzy''.
+  \end{block}
+\end{frame}
+
+% ===================================================================
+% Slide 4: Why This is Useful Beyond FQHE
+% ===================================================================
+\section{Beyond FQHE}
+
+\begin{frame}{Why This Matters Beyond FQHE}
+  \begin{columns}
+    \column{0.5\textwidth}
+    \begin{exampleblock}{Traditional FQHE use}
+      \begin{itemize}
+        \item Study charge/topological quantum Hall physics
+        \item Interactions \emph{inside} LLL determine phase
+      \end{itemize}
+    \end{exampleblock}
+
+    \column{0.5\textwidth}
+    \begin{alertblock}{Fuzzy sphere CFT use}
+      \begin{itemize}
+        \item Same LLL Hilbert space $\to$ \textbf{UV regulator}
+        \item Internal flavors encode target field theory
+      \end{itemize}
+    \end{alertblock}
+  \end{columns}
+
+  \begin{center}
+    \begin{tikzpicture}[scale=0.65]
+      % LLL box
+      \draw[primary, thick, fill=iceBlue!80] (-5,-2) rectangle (-1,2);
+      \node[primary, font=\small\bfseries] at (-3,2.4) {LLL Hilbert Space};
+      \node[font=\footnotesize, text width=3.5cm, align=center] at (-3,0.5)
+        {$\mathcal{H}_{\mathrm{LLL}}$\\$2S+1$ orbitals};
+
+      % Branch left
+      \draw[->, primary, thick] (-1,1) -- (2,1);
+      \node[font=\footnotesize, primary] at (0.5,1.6) {FQHE};
+      \node[font=\tiny, text width=3cm, align=center] at (3.5,1)
+        {charge physics\\quantum Hall};
+
+      % Branch right
+      \draw[->, accent, thick] (-1,-1) -- (2,-1);
+      \node[font=\footnotesize, accent] at (0.5,-0.4) {Fuzzy CFT};
+      \node[font=\tiny, text width=3cm, align=center] at (3.5,-1)
+        {critical spin/flavor sector\\charge sector frozen};
+
+      % Divider
+      \draw[primary!30, thick] (-1,-2) -- (-1,2);
+    \end{tikzpicture}
+  \end{center}
+
+  \begin{block}{Key message}
+    The Landau level is no longer the physics --- it is the \textbf{regulator}.
+  \end{block}
+\end{frame}
+
+% ===================================================================
+% Slide 5: Constructing a Fuzzy-Sphere Hamiltonian
+% ===================================================================
+\section{Hamiltonian Construction}
+
+\begin{frame}{Constructing a Fuzzy-Sphere Hamiltonian}
+  \begin{itemize}
+    \item Choose LLL creation operators $c^\dagger_{m,a}$
+    \item $m$ = orbital index, $a$ = flavor/spin
+    \item Write \textbf{rotationally invariant} interactions projected to LLL
+  \end{itemize}
+
+  \begin{equation}
+    H = \sum_{\ell} V_\ell \, P_\ell \;+\; \text{tuning terms}
+  \end{equation}
+
+  \begin{equation}
+    H = P_{\mathrm{LLL}} \, H_{\mathrm{int}} \, P_{\mathrm{LLL}}
+  \end{equation}
+
+  \begin{center}
+    \begin{tikzpicture}[scale=0.75]
+      \node[draw=primary, fill=iceBlue, rounded corners, text width=7cm,
+            font=\footnotesize, align=center, inner sep=8pt] (box) {
+        \textbf{Not:} put a lattice CFT Hamiltonian on a sphere\\
+        \textbf{Instead:} build a many-body Hamiltonian whose
+        \textbf{IR fixed point is the target CFT}
+      };
+    \end{tikzpicture}
+  \end{center}
+
+  \begin{block}{Key message}
+    Tune coupling constants to reach a \textbf{critical point}.
+  \end{block}
+\end{frame}
+
+% ===================================================================
+% Slide 6: State-Operator Correspondence
+% ===================================================================
+\section{State-Operator Correspondence}
+
+\begin{frame}{State-Operator Correspondence on $S^2 \times \mathbb{R}$}
+  \begin{columns}
+    \column{0.55\textwidth}
+    \begin{itemize}
+      \item For $2+1$D CFT on $S^2$, energy levels $\leftrightarrow$ scaling dimensions
+      \item Angular momentum labels $\mathrm{SO}(3)$ spin of operators
+    \end{itemize}
+
+    \vspace{0.5em}
+    \begin{equation}
+      E_n - E_0 = \frac{\Delta_n}{R}
+    \end{equation}
+
+    \begin{equation}
+      \text{states on } S^2 \;\longleftrightarrow\; \text{local operators in } \mathbb{R}^3
+    \end{equation}
+
+    \column{0.45\textwidth}
+    \centering
+    \begin{tikzpicture}[scale=0.85]
+      % Cylinder = S^2 x R
+      \draw[primary, thick] (0,-2) ellipse (1 and 0.3);
+      \draw[primary, thick] (0,2) ellipse (1 and 0.3);
+      \draw[primary, thick] (-1,-2) -- (-1,2);
+      \draw[primary, thick] (1,-2) -- (1,2);
+
+      % Radial quantization arrow
+      \draw[accent, ->, thick] (1.5,0) -- (2.5,0);
+      \draw[accent, ->, thick] (-1.5,0) -- (-2.5,0);
+
+      % Labels
+      \node[font=\small] at (0,2.5) {$S^2 \times \mathbb{R}$};
+      \node[font=\footnotesize, accent] at (2.8,0.6) {$\Delta_n = R(E_n-E_0)$};
+
+      % Operators on the side
+      \node[font=\footnotesize\sffamily, primary] at (3.5,1.5) {$\mathcal{O}_1$};
+      \node[font=\footnotesize\sffamily, primary] at (3.5,0.5) {$\mathcal{O}_2$};
+      \node[font=\footnotesize\sffamily, primary] at (3.5,-0.5) {$\mathcal{O}_3$};
+    \end{tikzpicture}
+  \end{columns}
+
+  \begin{block}{Key message}
+    Exact diagonalization gives an \textbf{operator spectrum},
+    not just a phase diagram.
+  \end{block}
+\end{frame}
+
+% ===================================================================
+% Slide 7: Numerical Workflow
+% ===================================================================
+\section{Numerical Workflow}
+
+\begin{frame}{Numerical Workflow}
+  \begin{center}
+    \begin{tikzpicture}[
+      box/.style={draw=primary, fill=iceBlue, rounded corners,
+                  font=\footnotesize\sffamily, align=center,
+                  minimum width=2.2cm, minimum height=0.8cm},
+      arrow/.style={->, accent, thick}
+    ]
+    % Row 1
+    \node[box] (n1) {Choose\\$N = 2S+1$};
+    \node[box, right=0.3cm of n1] (n2) {Build\\LLL basis};
+    \node[box, right=0.3cm of n2] (n3) {Construct\\$H$ (SO(3)-inv.)};
+    \node[box, right=0.3cm of n3] (n4) {Diagonalize\\by quantum \#s};
+
+    % Arrows row 1
+    \draw[arrow] (n1) -- (n2);
+    \draw[arrow] (n2) -- (n3);
+    \draw[arrow] (n3) -- (n4);
+
+    % Row 2
+    \node[box, below=0.6cm of n2, fill=paleGold] (n5) {Tune to\\criticality};
+    \node[box, below=0.6cm of n3, fill=paleGold] (n6) {Compare with\\CFT / Bootstrap / QMC};
+
+    \draw[arrow] (n4.south) -- ++(0,-0.3) -| (n5.north);
+    \draw[arrow] (n5) -- (n6);
+    \end{tikzpicture}
+  \end{center}
+
+  \vspace{0.5em}
+  \begin{columns}
+    \column{0.5\textwidth}
+    \begin{block}{Key observables}
+      \begin{itemize}
+        \item Energy spectrum
+        \item Angular momentum sectors
+        \item Scaling dimensions $\Delta_n$
+      \end{itemize}
+    \end{block}
+
+    \column{0.5\textwidth}
+    \begin{block}{Advanced}
+      \begin{itemize}
+        \item OPE coefficients
+        \item Correlation functions
+        \item Finite-size scaling
+      \end{itemize}
+    \end{block}
+  \end{columns}
+\end{frame}
+
+% ===================================================================
+% Slide 8: Why Not Just Use a Lattice?
+% ===================================================================
+\section{Why Not a Lattice?}
+
+\begin{frame}{Why Not Just Use a Lattice?}
+  \begin{columns}
+    \column{0.5\textwidth}
+    \begin{alertblock}{Lattice approach}
+      \begin{itemize}
+        \item Breaks continuous rotation
+        \item Strong microscopic anisotropy
+        \item CFT data muddied by irrelevant operators
+        \item Cubic symmetry $\neq$ full $\mathrm{SO}(3)$
+      \end{itemize}
+    \end{alertblock}
+
+    \column{0.5\textwidth}
+    \begin{exampleblock}{Fuzzy sphere approach}
+      \begin{itemize}
+        \item $\mathrm{SO}(3)$ exact at \emph{any} finite size
+        \item CFT data organized by angular momentum
+        \item Finite-size scaling $\sim$ radial quantization
+        \item No lattice artifacts
+      \end{itemize}
+    \end{exampleblock}
+  \end{columns}
+
+  \vspace{1em}
+  \begin{center}
+    \begin{tikzpicture}[scale=0.7]
+      % Left: lattice (cubic)
+      \draw[primary, step=1, thin] (0,0) grid (3,3);
+      \draw[primary, thick] (0,0) rectangle (3,3);
+      \node[font=\footnotesize] at (1.5,-0.6) {Lattice: breaks SO(3)};
+
+      % Arrow
+      \draw[->, accent, line width=1.5pt] (4,1.5) -- (6,1.5);
+      \node[accent, font=\footnotesize] at (5,2.2) {better};
+
+      % Right: fuzzy sphere
+      \shade[ball color=primary!20] (8.5,1.5) circle (1.5);
+      \draw[primary, thick] (8.5,1.5) circle (1.5);
+      \foreach \a in {0,45,...,315} {
+        \fill[accent!60] ({8.5+1.2*cos(\a)},{1.5+1.2*sin(\a)}) circle (0.05);
+      }
+      \node[font=\footnotesize] at (8.5,-0.6) {Fuzzy $S^2$: SO(3) exact};
+    \end{tikzpicture}
+  \end{center}
+
+  \begin{block}{Key message}
+    Fuzzy sphere is not ``easier ED'' --- it is a \textbf{symmetry-adapted
+    regulator} for CFT.
+  \end{block}
+\end{frame}
+
+% ===================================================================
+% Slide 9: Take-Home Message
+% ===================================================================
+\section{Conclusion}
+
+\begin{frame}{Take-Home Message}
+  \begin{center}
+    \begin{tikzpicture}[
+      box/.style={draw=primary, fill=iceBlue, rounded corners,
+                  font=\sffamily, align=center, inner sep=10pt,
+                  minimum width=3.5cm}
+    ]
+    \node[box] at (-3.5,0) (b1) {FQHE\\\footnotesize supplies the Hilbert space\\\footnotesize LLL on Haldane sphere};
+    \node[box] at (0,0) (b2) {Fuzzy Sphere\\\footnotesize supplies the regulator\\\footnotesize Finite noncommutative $S^2$};
+    \node[box] at (3.5,0) (b3) {Numerical CFT\\\footnotesize supplies the goal\\\footnotesize Conformal spectra \& data};
+
+    \draw[->, accent, thick] (b1) -- (b2);
+    \draw[->, accent, thick] (b2) -- (b3);
+    \end{tikzpicture}
+  \end{center}
+
+  \vspace{2em}
+  \begin{center}
+    \begin{tikzpicture}
+      \node[draw=accent, fill=paleGold, rounded corners,
+            font=\sffamily\large, align=center, inner sep=12pt] {
+        \textbf{The surprise:}\\
+        A tool born in quantum Hall physics\\
+        becomes a \textbf{microscope for 3D conformal field theory}
+      };
+    \end{tikzpicture}
+  \end{center}
+\end{frame}
+
+% ===================================================================
+% Thank you
+% ===================================================================
+\thankyoupage
+
+\end{document}

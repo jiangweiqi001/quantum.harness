@@ -1,0 +1,72 @@
+% beamercolorthemeAcademic.sty — Color definitions for Academic Beamer theme
+\mode<presentation>
+
+% --- Shared color palette ---
+\definecolor{primary}{HTML}{1B2A4A}    % Deep Navy
+\definecolor{accent}{HTML}{C8A951}     % Muted Gold
+\definecolor{paleGold}{HTML}{F5EDD6}   % Pale Gold
+\definecolor{iceBlue}{HTML}{EEF2F7}    % Ice Blue
+\definecolor{bodyText}{HTML}{1A1A1A}   % Near-black
+
+% --- Beamer palette mapping ---
+\setbeamercolor{palette primary}{fg=white, bg=primary}
+\setbeamercolor{palette secondary}{fg=primary, bg=accent}
+\setbeamercolor{palette tertiary}{fg=primary, bg=iceBlue}
+\setbeamercolor{palette quaternary}{fg=bodyText, bg=paleGold}
+
+% --- Structure colors ---
+\setbeamercolor{structure}{fg=accent}
+\setbeamercolor{alerted text}{fg=accent}
+
+% --- Navigation bar ---
+\setbeamercolor{section in head/foot}{fg=accent, bg=primary}
+\setbeamercolor{section in head/foot shaded}{fg=white!70, bg=primary}
+\setbeamercolor{subsection in head/foot}{fg=white, bg=primary}
+\setbeamercolor{subsection in head/foot shaded}{fg=white!60, bg=primary}
+
+% --- Palette sidebar (not used, but set for completeness) ---
+\setbeamercolor{sidebar}{bg=primary, fg=white}
+\setbeamercolor{sidebar}{parent=palette primary}
+
+% --- Title page ---
+\setbeamercolor{title}{fg=primary}
+\setbeamercolor{subtitle}{fg=primary!80}
+\setbeamercolor{author}{fg=bodyText}
+\setbeamercolor{institute}{fg=gray}
+\setbeamercolor{date}{fg=gray}
+
+% --- Frame title ---
+\setbeamercolor{frametitle}{fg=primary}
+\setbeamercolor{framesubtitle}{fg=primary!80}
+
+% --- Block environments ---
+\setbeamercolor{block title}{fg=white, bg=primary}
+\setbeamercolor{block body}{fg=bodyText, bg=iceBlue}
+\setbeamercolor{block title alerted}{fg=primary, bg=accent}
+\setbeamercolor{block body alerted}{fg=bodyText, bg=paleGold}
+\setbeamercolor{block title example}{fg=white, bg=primary}
+\setbeamercolor{block body example}{fg=bodyText, bg=iceBlue!50}
+
+% --- Itemize/enumerate ---
+\setbeamercolor{item}{fg=accent}
+\setbeamercolor{subitem}{fg=primary}
+\setbeamercolor{subsubitem}{fg=gray}
+\setbeamercolor{enumerate item}{fg=primary}
+
+% --- Footline ---
+\setbeamercolor{footline}{fg=primary}
+
+% --- Captions ---
+\setbeamercolor{caption}{fg=primary}
+\setbeamercolor{caption name}{fg=primary}
+
+% --- Bibliography ---
+\setbeamercolor{bibliography entry author}{fg=primary}
+\setbeamercolor{bibliography entry title}{fg=bodyText}
+\setbeamercolor{bibliography entry location}{fg=gray}
+\setbeamercolor{bibliography entry note}{fg=gray}
+
+% --- Background ---
+\setbeamercolor{background canvas}{bg=white}
+
+\mode<all>

@@ -1,0 +1,88 @@
+% beamerinnerthemeAcademic.sty — Inner elements for Academic Beamer theme
+\mode<presentation>
+
+% --- Title page ---
+\defbeamertemplate*{title page}{Academic theme}
+{%
+  \vbox{}
+  \vfill
+  \begin{centering}
+    {\usebeamerfont{title}\usebeamercolor[fg]{title}\inserttitle\par}
+    \vskip0.5em
+    \ifx\insertsubtitle\@empty\else
+      {\usebeamerfont{subtitle}\usebeamercolor[fg]{subtitle}\insertsubtitle\par}
+      \vskip1em
+    \fi
+    % Gold decorative line
+    {\color{accent}\rule{0.5\textwidth}{0.8pt}\par}
+    \vskip1.5em
+    {\usebeamerfont{author}\usebeamercolor[fg]{author}\insertauthor\par}
+    \vskip0.5em
+    {\usebeamerfont{institute}\usebeamercolor[fg]{institute}\insertinstitute\par}
+    \vskip0.5em
+    {\usebeamerfont{date}\usebeamercolor[fg]{date}\insertdate\par}
+  \end{centering}
+  \vfill
+}
+
+% --- Itemize markers ---
+% Level 1: gold filled circle
+\setbeamertemplate{itemize item}{\small\color{accent}$\bullet$}
+\setbeamertemplate{itemize subitem}{\small\color{primary}---}
+\setbeamertemplate{itemize subsubitem}{\small\color{gray}$\cdot$}
+
+% --- Enumerate markers ---
+\setbeamertemplate{enumerate item}{\color{primary}\insertenumlabel.}
+\setbeamertemplate{enumerate subitem}{\color{primary}\insertsubenumlabel.}
+\setbeamertemplate{enumerate subsubitem}{\color{primary}\insertsubsubenumlabel.}
+
+% --- Blocks with rounded corners ---
+\setbeamertemplate{blocks}[rounded][shadow=false]
+
+% Round block corners (2pt)
+% Beamer default rounded already uses ~4pt; we accept the default.
+% Shadow is off for a cleaner modern look.
+
+% --- Table of Contents ---
+\setbeamertemplate{section in toc}[sections numbered]
+\setbeamercolor{section in toc}{fg=primary}
+\setbeamerfont{section in toc}{family=\sffamily, size=\large}
+\setbeamercolor{subsection in toc}{fg=primary!70}
+\setbeamerfont{subsection in toc}{family=\sffamily, size=\normalsize}
+
+% --- Theorem environments ---
+% Beamer already provides theorem, lemma, corollary, definition,
+% remark, example, proof environments by default. We override their
+% styles via block templates in beamercolorthemeAcademic.sty.
+
+% Proof environment with gold accent
+\newenvironment{proofblock}[1][\proofname]{%
+  \par\noindent\textbf{\sffamily\color{primary}#1.}%
+}{%
+  \hfill$\blacksquare$\par
+}
+
+% --- Thank-you end slide ---
+\newcommand{\thankyoupage}{%
+  \begin{frame}[plain]
+    \vbox{}
+    \vfill
+    \begin{centering}
+      {\usebeamerfont{frametitle}\usebeamercolor[fg]{frametitle}Thank You\par}
+      \vskip1em
+      {\color{accent}\rule{0.4\textwidth}{0.8pt}\par}
+      \vskip2em
+      {\usebeamerfont{author}\usebeamercolor[fg]{author}\insertauthor\par}
+      \vskip0.5em
+      {\usebeamerfont{institute}\usebeamercolor[fg]{institute}\insertinstitute\par}
+    \end{centering}
+    \vfill
+  \end{frame}
+}
+
+% --- Frametitle continuation (allowframebreaks styling) ---
+\setbeamertemplate{frametitle continuation}[from second]
+\setbeamerfont{frametitle continuation}{family=\sffamily, size=\small}
+\setbeamercolor{frametitle continuation}{fg=primary!50}
+
+\mode<all>
