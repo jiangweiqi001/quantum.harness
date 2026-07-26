@@ -1,0 +1,18 @@
+[project]
+name = "quantum-harness-ed"
+version = "0.1.0"
+description = "Reproducible Python environment for the exact-diagonalization track"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "h5py",
+    "matplotlib",
+    "numpy",
+    "pymupdf",
+    "pymupdf4llm",
+    "pytest",
+    "quspin",
+    "scipy",
+]
+
+[tool.uv]
+package = false

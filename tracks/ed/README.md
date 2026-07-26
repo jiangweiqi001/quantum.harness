@@ -10,6 +10,29 @@ Reproduce three figures:
 2. **Fig. 3** — rare eigenstates inside the many-body spectrum have anomalously large overlap with $|Z_2\rangle$.
 3. **Fig. 4** — level statistics are ETH-like; the revivals are not due to conventional integrability.
 
+## Reproduction scope
+
+- **Fig. 2:** first reproduce the revivals with finite-size QuSpin ED. The
+  published figure used thermodynamic-limit iTEBD, so the finite-size result is
+  a qualitative reproduction rather than an exact recreation of every curve.
+- **Fig. 3:** build and validate the overlap/FSA pipeline at `L=12–20` before
+  scaling. The published `L=32`, `k=0`, inversion-even full eigensystem needs a
+  high-memory compute node and is not suitable for a 16 GB workstation.
+- **Fig. 4:** use the adjacent-gap ratio as an initial diagnostic, then reproduce
+  the paper's unfolded level-spacing distribution with its stated spectral
+  window and zero-mode exclusion.
+
+Install the locked Python 3.12 environment with:
+
+```bash
+uv sync --python 3.12
+```
+
+The official source data for all figures is published under CC BY 4.0 at
+[doi:10.5518/335](https://doi.org/10.5518/335). Local copies belong in the
+gitignored directory `.external/official-data/turner-2018/`; they are validation
+references, not substitutes for independently generated results.
+
 ## References
 
 1. **Weiße & Fehske** — classic ED algorithm reference.

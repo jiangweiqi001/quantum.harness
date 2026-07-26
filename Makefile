@@ -135,10 +135,9 @@ install-quimb: ## Install quimb + numerical deps into .venv (Python fallback sta
 
 install-quspin: ## Install QuSpin exact diagonalization fallback stack into .venv
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found. Install uv first: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }
-	@uv venv .venv
-	@uv pip install --python .venv/bin/python quspin numpy scipy matplotlib
-	@.venv/bin/python -c 'import quspin; print(quspin.__version__)'
-	@echo "QuSpin environment ready in .venv"
+	@uv sync --python 3.12
+	@.venv/bin/python -c 'import h5py, matplotlib, numpy, pymupdf4llm, pytest, quspin, scipy; print("QuSpin", quspin.__version__)'
+	@echo "Locked QuSpin/PDF environment ready in .venv"
 
 install-julia: ## Install Julia via juliaup (default harness language)
 	@command -v julia >/dev/null && { echo "Julia already installed: $$(julia --version)"; exit 0; } || true
@@ -265,17 +264,10 @@ install-classical-repro: ## Install stacks for DMRG, QMC/SSE, and CTMRG reproduc
 	@echo "Classical reproduction stacks ready."
 
 install-pdf-render: ## Install PDF-to-Markdown rendering tools into .venv
-	@if command -v uv >/dev/null 2>&1; then \
-	  uv venv .venv; \
-	  uv pip install --python .venv/bin/python pymupdf pymupdf4llm; \
-	else \
-	  command -v python3 >/dev/null 2>&1 || { echo "python3 not found. Install Python 3 first."; exit 1; }; \
-	  python3 -m venv .venv; \
-	  .venv/bin/python -m pip install --upgrade pip; \
-	  .venv/bin/python -m pip install pymupdf pymupdf4llm; \
-	fi
+	@command -v uv >/dev/null 2>&1 || { echo "uv not found. Install uv first: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }
+	@uv sync --python 3.12
 	@.venv/bin/python -c 'import pymupdf4llm; print("pymupdf4llm ready")'
-	@echo "PDF-to-Markdown rendering tools ready in .venv"
+	@echo "Locked QuSpin/PDF environment ready in .venv"
 
 serve: ## Serve the recommended-workflows website locally. Optional: PORT=8000
 	@echo "Serving .github/template at http://localhost:$(or $(PORT),8000)/ (Ctrl-C to stop)"
