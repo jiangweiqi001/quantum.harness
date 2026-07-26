@@ -251,7 +251,7 @@ name = "scientific-visualization"
 source = "https://github.com/HughYau/AcademicForge.git"
 kind = "git"
 path = "scientific-visualization"
-commit = "8f1e7a29710ab7ea9c4b1b6f4073c8d2447ab833"
+commit = "1e3ece9e82758e34ca442398bac6edcaf1c61ea6"
 checksum = "sha256:dfe730f72015268b902a22d2e5f389cfaf5478463749e26fb865f4dff390bc74"
 
 [[skill]]
