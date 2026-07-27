@@ -608,3 +608,66 @@ def test_legacy_small_l_renderer_still_writes_analyze_spectrum_arrays(tmp_path):
     with np.load(tmp_path / "fig3_L10.npz", allow_pickle=False) as persisted:
         np.testing.assert_allclose(persisted["energies"], expected["energies"])
         np.testing.assert_allclose(persisted["overlap_z2"], expected["overlap_z2"])
+
+
+def test_independent_panel_a_is_logarithmic_without_replacing_zero_overlaps(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "independent"
+    _output, expected = _independent_result(root)
+    loaded = fig3.load_independent_results(root)
+    overlap = np.zeros_like(expected["overlap_z2"])
+    overlap[0] = 0.5 - 1e-12
+    overlap[1] = 1e-12
+    loaded[10]["overlap_z2"] = overlap
+    fsa_overlap = loaded[10]["fsa_overlap_z2"].copy()
+    fsa_overlap[0] = 0.0
+    loaded[10]["fsa_overlap_z2"] = fsa_overlap
+    monkeypatch.setattr(fig3, "load_independent_results", lambda _root: loaded)
+    captured = {}
+    original_write = fig3._write_png_partial
+
+    def inspect_panel(partial, figure):
+        panel = figure.axes[0]
+        captured["yscale"] = panel.get_yscale()
+        captured["ed_y"] = np.asarray(panel.collections[0].get_offsets())[:, 1]
+        captured["fsa_y"] = np.asarray(panel.collections[1].get_offsets())[:, 1]
+        original_write(partial, figure)
+
+    monkeypatch.setattr(fig3, "_write_png_partial", inspect_panel)
+
+    path = fig3.render_independent_fig3(
+        root,
+        output_dir=tmp_path / "figure",
+        official_data_dir=None,
+    )
+
+    assert captured["yscale"] == "log"
+    np.testing.assert_array_equal(captured["ed_y"], overlap)
+    np.testing.assert_array_equal(captured["fsa_y"], fsa_overlap)
+    assert captured["ed_y"][0] > 0
+    assert captured["ed_y"][1] == pytest.approx(1e-12)
+    assert np.count_nonzero(captured["ed_y"] == 0.0) == overlap.size - 2
+    with np.load(path.with_suffix(".npz"), allow_pickle=False) as sidecar:
+        np.testing.assert_array_equal(sidecar["panel_a_L10_overlap_z2"], overlap)
+    metrics = json.loads(path.with_suffix(".json").read_text())
+    assert metrics["plot_conventions"]["panel_a"] == {
+        "y_scale": "log",
+        "nonpositive": "masked",
+        "stored_overlap_values": "unmodified",
+    }
+
+
+def test_legacy_panel_a_uses_paper_logarithmic_overlap_axis(tmp_path, monkeypatch):
+    captured = {}
+    original_savefig = plt.Figure.savefig
+
+    def inspect_panel(figure, *args, **kwargs):
+        captured["yscale"] = figure.axes[0].get_yscale()
+        return original_savefig(figure, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Figure, "savefig", inspect_panel)
+
+    fig3.run_figure(10, output_dir=tmp_path, official_data_dir=None)
+
+    assert captured["yscale"] == "log"

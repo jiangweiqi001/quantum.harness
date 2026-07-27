@@ -475,6 +475,13 @@ def _series_entry(
     return entry
 
 
+def _configure_overlap_axis(panel: Any) -> None:
+    """Use the paper's log scale while leaving nonpositive values unplotted."""
+    panel.set_yscale("log", nonpositive="mask")
+    panel.set_xlabel("energy")
+    panel.set_ylabel(r"$|\langle E|Z_2\rangle|^2$")
+
+
 def render_independent_fig3(
     independent_results_root: str | Path,
     *,
@@ -699,8 +706,7 @@ def render_independent_fig3(
                     OFFICIAL_SOURCE, panel="a", length=primary_length
                 )
 
-    panel_a.set_xlabel("energy")
-    panel_a.set_ylabel(r"$|\langle E|Z_2\rangle|^2$")
+    _configure_overlap_axis(panel_a)
     panel_a.legend(fontsize=8)
     panel_d.set_xlabel("system size L")
     panel_d.set_ylabel(r"$PR_2=\sum_\alpha |c_\alpha|^4$")
@@ -860,6 +866,13 @@ def render_independent_fig3(
             "reports only even gaps between the minimum and maximum independent "
             "lengths; never connects or substitutes official data"
         ),
+        "plot_conventions": {
+            "panel_a": {
+                "y_scale": "log",
+                "nonpositive": "masked",
+                "stored_overlap_values": "unmodified",
+            }
+        },
         "series": series,
         "selected_panel_states": selected_details,
         "lengths": per_length,
@@ -1154,8 +1167,7 @@ def run_figure(
         markeredgecolor="tab:blue",
         label=f"our matched FSA special L={length}",
     )
-    panel_a.set_xlabel("energy")
-    panel_a.set_ylabel(r"$|\langle E|Z_2\rangle|^2$")
+    _configure_overlap_axis(panel_a)
     panel_a.legend(fontsize=8)
     panel_d.set_xlabel("system size L")
     panel_d.set_ylabel(r"$PR_2=\sum_\alpha |c_\alpha|^4$")
