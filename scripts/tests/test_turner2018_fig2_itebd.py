@@ -320,6 +320,99 @@ def _write_official_data(path: Path, *, stop: float = 3.0) -> None:
     )
 
 
+def test_render_figures_selects_state_specific_entropy_cuts(tmp_path, monkeypatch):
+    states = ("vacuum", "Z2", "Z3", "Z4")
+    result_paths = []
+    generated = {}
+    for state in states:
+        path = tmp_path / f"fig2_itebd_{state}.h5"
+        generated[state] = _write_result(path, state)
+        result_paths.append(path)
+    official_dir = tmp_path / "official"
+    _write_official_data(official_dir)
+
+    plt.close("all")
+    monkeypatch.setattr(plt, "close", lambda *args, **kwargs: None)
+    render_figures(
+        result_paths,
+        official_dir,
+        tmp_path,
+        fit_window=(0.0, 3.0),
+    )
+
+    figures = [plt.figure(number) for number in plt.get_fignums()]
+    paper_figure = next(figure for figure in figures if len(figure.axes) == 3)
+    assert paper_figure.axes[0].get_ylabel() == "entropy at state-specific cut"
+    for state in states:
+        line = next(
+            line
+            for line in paper_figure.axes[0].lines
+            if line.get_label() == f"generated iTEBD {state}"
+        )
+        expected_cut = 11 if state == "Z4" else 0
+        np.testing.assert_allclose(
+            line.get_ydata(),
+            generated[state]["entropy_by_bond"][:, expected_cut],
+        )
+        assert not np.allclose(
+            line.get_ydata(),
+            generated[state]["entropy_by_bond"][:, 0 if expected_cut == 11 else 11],
+        )
+
+    z2_residual_line = next(
+        line
+        for line in paper_figure.axes[1].lines
+        if line.get_label() == "generated iTEBD Z2"
+    )
+    z2_time = generated["Z2"]["time"]
+    z2_cut0 = generated["Z2"]["entropy_by_bond"][:, 0]
+    selected = (z2_time >= 0.0) & (z2_time <= 3.0)
+    slope, intercept = np.polyfit(z2_time[selected], z2_cut0[selected], deg=1)
+    np.testing.assert_allclose(
+        z2_residual_line.get_ydata(),
+        z2_cut0 - (slope * z2_time + intercept),
+    )
+
+    metrics = json.loads(
+        (tmp_path / "fig2_itebd_metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics["selected_entropy_cut"] == 0
+    assert metrics["entropy_cut_by_state"] == {
+        "vacuum": 0,
+        "Z2": 0,
+        "Z3": 0,
+        "Z4": 11,
+    }
+    for state in states:
+        expected_cut = 11 if state == "Z4" else 0
+        assert metrics["states"][state]["selected_entropy_cut"] == expected_cut
+
+    official_times = np.arange(0.0, 3.0 + 0.5, 1.0)
+    official_values = 3.0 * official_times + 2.0
+    z4_time = generated["Z4"]["time"]
+    z4_cut11 = generated["Z4"]["entropy_by_bond"][:, 11]
+    interpolated = np.interp(official_times, z4_time, z4_cut11)
+    expected_z4_rmse = float(
+        np.sqrt(np.mean((interpolated - official_values) ** 2))
+    )
+    assert metrics["states"]["Z4"]["official_entropy_rmse"] == pytest.approx(
+        expected_z4_rmse
+    )
+    z4_cut0 = generated["Z4"]["entropy_by_bond"][:, 0]
+    cut0_rmse = float(
+        np.sqrt(
+            np.mean(
+                (
+                    np.interp(official_times, z4_time, z4_cut0) - official_values
+                )
+                ** 2
+            )
+        )
+    )
+    assert cut0_rmse != pytest.approx(expected_z4_rmse)
+    plt.close("all")
+
+
 def test_render_figures_records_styles_cut_metrics_diagnostics_and_provenance(
     tmp_path,
     monkeypatch,
@@ -381,6 +474,12 @@ def test_render_figures_records_styles_cut_metrics_diagnostics_and_provenance(
         (tmp_path / "fig2_itebd_metrics.json").read_text(encoding="utf-8")
     )
     assert metrics["selected_entropy_cut"] == 0
+    assert metrics["entropy_cut_by_state"] == {
+        "vacuum": 0,
+        "Z2": 0,
+        "Z3": 0,
+        "Z4": 11,
+    }
     assert metrics["fit_window"] == [0.0, 3.0]
     assert metrics["official_data_complete"] is True
     assert metrics["comparison"]["interpolation_method"] == "linear numpy.interp"

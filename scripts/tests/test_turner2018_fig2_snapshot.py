@@ -112,6 +112,16 @@ def test_snapshot_copies_sources_writes_results_and_uses_completed_horizons(
         state: [0.0, horizon] for state, horizon in checkpoint_targets.items()
     }
     assert metrics["fit_window"] == pytest.approx(effective_fit_window)
+    assert metrics["selected_entropy_cut"] == 0
+    assert metrics["entropy_cut_by_state"] == {
+        "vacuum": 0,
+        "Z2": 0,
+        "Z3": 0,
+        "Z4": 11,
+    }
+    for state in STATES:
+        expected_cut = 11 if state == "Z4" else 0
+        assert metrics["states"][state]["selected_entropy_cut"] == expected_cut
     assert metrics["partial_status"]["text"] == "PARTIAL SNAPSHOT"
     partial_metadata = metrics["partial_status"]["metadata"]
     assert partial_metadata["requested_target_time"] == pytest.approx(target_time)

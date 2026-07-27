@@ -34,6 +34,12 @@ STATES = ("vacuum", "Z2", "Z3", "Z4")
 DEFAULT_OUTPUT = Path("tracks/ed/results/turner-2018/fig2-itebd")
 DEFAULT_OFFICIAL_DATA = Path(".external/official-data/turner-2018")
 ENTROPY_CUT = 0
+ENTROPY_CUT_BY_STATE = {
+    "vacuum": 0,
+    "Z2": 0,
+    "Z3": 0,
+    "Z4": 11,
+}
 COLORS = {
     "vacuum": "tab:gray",
     "Z2": "tab:blue",
@@ -449,6 +455,7 @@ def render_figures(
 
     metrics: dict[str, object] = {
         "selected_entropy_cut": ENTROPY_CUT,
+        "entropy_cut_by_state": dict(ENTROPY_CUT_BY_STATE),
         "fit_window": [float(fit_window[0]), float(fit_window[1])],
         "official_data_complete": not missing_sources,
         "official_sources": {
@@ -469,9 +476,10 @@ def render_figures(
     for state in states:
         arrays = results[state]
         time = arrays["time"]
-        entropy = arrays["entropy_by_bond"][:, ENTROPY_CUT]
+        entropy_cut = ENTROPY_CUT_BY_STATE[state]
+        entropy = arrays["entropy_by_bond"][:, entropy_cut]
         state_metrics: dict[str, object] = {
-            "selected_entropy_cut": ENTROPY_CUT,
+            "selected_entropy_cut": entropy_cut,
             "fit_window": [float(fit_window[0]), float(fit_window[1])],
             "sample_count": int(len(time)),
             "time_range": [float(time[0]), float(time[-1])],
@@ -567,7 +575,8 @@ def render_figures(
         for state in states:
             arrays = results[state]
             time = arrays["time"]
-            entropy = arrays["entropy_by_bond"][:, ENTROPY_CUT]
+            entropy_cut = ENTROPY_CUT_BY_STATE[state]
+            entropy = arrays["entropy_by_bond"][:, entropy_cut]
             axes[0].plot(
                 time,
                 entropy,
@@ -655,7 +664,7 @@ def render_figures(
             if rmse is not None:
                 metrics["states"]["Z2"]["official_correlation_rmse"] = rmse
 
-        axes[0].set_ylabel(f"entropy at cut {ENTROPY_CUT}")
+        axes[0].set_ylabel("entropy at state-specific cut")
         axes[1].set_ylabel("entropy residual")
         axes[2].set_ylabel(r"$\langle Z_i Z_{i+1}\rangle$")
         axes[2].set_xlabel("time")
