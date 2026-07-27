@@ -4,15 +4,17 @@ version = "0.1.0"
 description = "Reproducible Python environment for the exact-diagonalization track"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "h5py",
-    "matplotlib",
-    "numpy",
+    "contourpy==1.3.2",
+    "h5py==3.14.0",
+    "matplotlib==3.10.9",
+    "numpy==2.2.6",
     "physics-tenpy>=1.1.0",
+    "pillow==12.2.0",
     "pymupdf",
     "pymupdf4llm",
     "pytest",
     "quspin",
-    "scipy",
+    "scipy==1.15.3",
 ]
 
 [tool.uv]

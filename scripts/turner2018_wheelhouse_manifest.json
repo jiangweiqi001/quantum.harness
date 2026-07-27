@@ -1,25 +1,25 @@
 {
   "schema_version": "turner2018-wheelhouse-v1",
   "python": "3.12",
-  "platform": "manylinux_2_28_x86_64",
+  "platform": "manylinux2014_x86_64",
   "implementation": "cp",
   "abi": "cp312",
-  "lock_sha256": "91e98dd2ff1fdfc5f8892ea1a7d3c0409b250580aa4d0625d818b747fedd6887",
+  "lock_sha256": "2c2a7b176a09612cb518698db98ee89608598141bfd3932377d74f6a4fb8e537",
   "packages": [
     {
       "name": "contourpy",
-      "version": "1.3.3",
-      "filename": "contourpy-1.3.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "sha256": "4d00e655fcef08aba35ec9610536bfe90267d7ab5ba944f7032549c55a146da1",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/cc/8f/ec6289987824b29529d0dfda0d74a07cec60e54b9c92f3c9da4c0ac732de/contourpy-1.3.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "tags": ["cp312", "cp312", "manylinux_2_27_x86_64.manylinux_2_28_x86_64"]
+      "version": "1.3.2",
+      "filename": "contourpy-1.3.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "f26b383144cf2d2c29f01a1e8170f50dacf0eac02d64139dcd709a8ac4eb3cfe",
+      "url": "https://files.pythonhosted.org/packages/a8/32/b8a1c8965e4f72482ff2d1ac2cd670ce0b542f203c8e1d34e7c3e6925da7/contourpy-1.3.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "tags": ["cp312", "cp312", "manylinux_2_17_x86_64.manylinux2014_x86_64"]
     },
     {
       "name": "cycler",
       "version": "0.12.1",
       "filename": "cycler-0.12.1-py3-none-any.whl",
       "sha256": "85cef7cff222d8644161529808465972e51340599459b8ac3ccbac5a854e0d30",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/e7/05/c19819d5e3d95294a6f5947fb9b9629efb316b96de511b418c53d245aae6/cycler-0.12.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/e7/05/c19819d5e3d95294a6f5947fb9b9629efb316b96de511b418c53d245aae6/cycler-0.12.1-py3-none-any.whl",
       "tags": ["py3", "none", "any"]
     },
     {
@@ -27,63 +27,63 @@
       "version": "4.63.0",
       "filename": "fonttools-4.63.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
       "sha256": "58dc6bb86a78d782f00f9190ca02c119cf5bbe2807536e361e18d42019f877d8",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/77/c7/2342da9830e3e9d4870305ca5d2091d2a83284f2953079b7bdd3b5e029d8/fonttools-4.63.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/77/c7/2342da9830e3e9d4870305ca5d2091d2a83284f2953079b7bdd3b5e029d8/fonttools-4.63.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
       "tags": ["cp312", "cp312", "manylinux2014_x86_64.manylinux_2_17_x86_64"]
     },
     {
       "name": "h5py",
-      "version": "3.16.0",
-      "filename": "h5py-3.16.0-cp312-cp312-manylinux_2_28_x86_64.whl",
-      "sha256": "dfc21898ff025f1e8e67e194965a95a8d4754f452f83454538f98f8a3fcb207e",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/9e/e9/1a19e42cd43cc1365e127db6aae85e1c671da1d9a5d746f4d34a50edb577/h5py-3.16.0-cp312-cp312-manylinux_2_28_x86_64.whl",
-      "tags": ["cp312", "cp312", "manylinux_2_28_x86_64"]
+      "version": "3.14.0",
+      "filename": "h5py-3.14.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "0cbd41f4e3761f150aa5b662df991868ca533872c95467216f2bec5fcad84882",
+      "url": "https://files.pythonhosted.org/packages/86/f9/f00de11c82c88bfc1ef22633557bfba9e271e0cb3189ad704183fc4a2644/h5py-3.14.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "tags": ["cp312", "cp312", "manylinux_2_17_x86_64.manylinux2014_x86_64"]
     },
     {
       "name": "kiwisolver",
       "version": "1.5.0",
       "filename": "kiwisolver-1.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
       "sha256": "bb5136fb5352d3f422df33f0c879a1b0c204004324150cc3b5e3c4f310c9049f",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/c4/13/680c54afe3e65767bed7ec1a15571e1a2f1257128733851ade24abcefbcc/kiwisolver-1.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/c4/13/680c54afe3e65767bed7ec1a15571e1a2f1257128733851ade24abcefbcc/kiwisolver-1.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
       "tags": ["cp312", "cp312", "manylinux2014_x86_64.manylinux_2_17_x86_64"]
     },
     {
       "name": "matplotlib",
-      "version": "3.11.1",
-      "filename": "matplotlib-3.11.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
-      "sha256": "ba8f811b8ddfac493734d6af0b2dff96919d0c28ca0d641858dab4262777c6ea",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/c9/cf/b4ad2cc81b6672ea29ea04e64e350a9f9b493b0908ccd884c67eeff8f7b2/matplotlib-3.11.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "version": "3.10.9",
+      "filename": "matplotlib-3.10.9-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "ae20801130378b82d647ff5047c07316295b68dc054ca6b3c13519d0ea624285",
+      "url": "https://files.pythonhosted.org/packages/32/91/d024616abdba99e83120e07a20658976f6a343646710760c4a51df126029/matplotlib-3.10.9-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
       "tags": ["cp312", "cp312", "manylinux2014_x86_64.manylinux_2_17_x86_64"]
     },
     {
       "name": "numpy",
-      "version": "2.4.6",
-      "filename": "numpy-2.4.6-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "sha256": "90f9849678c75fe7afa2d348ac842c168b0a4d3d61919687216dfc547976d853",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/99/60/14115e6364fa676c5397c2ad3004e527e9aa487abf5d0706ec81bbd08529/numpy-2.4.6-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "tags": ["cp312", "cp312", "manylinux_2_27_x86_64.manylinux_2_28_x86_64"]
+      "version": "2.2.6",
+      "filename": "numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "fd83c01228a688733f1ded5201c678f0c53ecc1006ffbc404db9f7a899ac6249",
+      "url": "https://files.pythonhosted.org/packages/8c/3d/1e1db36cfd41f895d266b103df00ca5b3cbe965184df824dec5c08c6b803/numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "tags": ["cp312", "cp312", "manylinux_2_17_x86_64.manylinux2014_x86_64"]
     },
     {
       "name": "packaging",
       "version": "26.2",
       "filename": "packaging-26.2-py3-none-any.whl",
       "sha256": "5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl",
       "tags": ["py3", "none", "any"]
     },
     {
       "name": "pillow",
-      "version": "12.3.0",
-      "filename": "pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "sha256": "78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/84/21/a35af28dcc61f37ed850a2d64c65c701321dfbf25085e469d5559360cbbf/pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "tags": ["cp312", "cp312", "manylinux_2_27_x86_64.manylinux_2_28_x86_64"]
+      "version": "12.2.0",
+      "filename": "pillow-12.2.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "b86024e52a1b269467a802258c25521e6d742349d760728092e1bc2d135b4d76",
+      "url": "https://files.pythonhosted.org/packages/e9/9e/c05e19657fd57841e476be1ab46c4d501bffbadbafdc31a6d665f8b737b6/pillow-12.2.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "tags": ["cp312", "cp312", "manylinux2014_x86_64.manylinux_2_17_x86_64"]
     },
     {
       "name": "pyparsing",
       "version": "3.3.2",
       "filename": "pyparsing-3.3.2-py3-none-any.whl",
       "sha256": "850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl",
       "tags": ["py3", "none", "any"]
     },
     {
@@ -91,33 +91,33 @@
       "version": "2.9.0.post0",
       "filename": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
       "sha256": "a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
       "tags": ["py2.py3", "none", "any"]
     },
     {
       "name": "scipy",
-      "version": "1.18.0",
-      "filename": "scipy-1.18.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "sha256": "1f55797419e16e7f30cf88ffb3113ce0467f00cfe3f70d5c281730b21769bfc2",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/dd/aa/1b939f6c67ed68635bb538e6752d3dacc02f66535182e939a89581a44e9c/scipy-1.18.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "tags": ["cp312", "cp312", "manylinux_2_27_x86_64.manylinux_2_28_x86_64"]
+      "version": "1.15.3",
+      "filename": "scipy-1.15.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "271e3713e645149ea5ea3e97b57fdab61ce61333f97cfae392c28ba786f9bb49",
+      "url": "https://files.pythonhosted.org/packages/0b/1f/03f52c282437a168ee2c7c14a1a0d0781a9a4a8962d84ac05c06b4c5b555/scipy-1.15.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "tags": ["cp312", "cp312", "manylinux_2_17_x86_64.manylinux2014_x86_64"]
     },
     {
       "name": "six",
       "version": "1.17.0",
       "filename": "six-1.17.0-py2.py3-none-any.whl",
       "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
-      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl",
       "tags": ["py2.py3", "none", "any"]
     }
   ],
   "smoke_import": {
     "modules": ["numpy", "scipy", "h5py", "matplotlib"],
     "expected_versions": {
-      "numpy": "2.4.6",
-      "scipy": "1.18.0",
-      "h5py": "3.16.0",
-      "matplotlib": "3.11.1"
+      "numpy": "2.2.6",
+      "scipy": "1.15.3",
+      "h5py": "3.14.0",
+      "matplotlib": "3.10.9"
     },
     "installer": "pip --no-index --find-links"
   }

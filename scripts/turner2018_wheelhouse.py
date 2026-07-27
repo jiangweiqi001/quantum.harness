@@ -18,6 +18,10 @@ import urllib.request
 
 
 MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+COMPATIBLE_LINUX_TAGS = {
+    "manylinux2014_x86_64",
+    "manylinux_2_17_x86_64",
+}
 ISOLATED_SMOKE_SOURCE = """\
 import importlib
 import importlib.metadata
@@ -62,11 +66,36 @@ def _validate_smoke_import(manifest: dict) -> dict:
     return smoke
 
 
+def _validate_wheel_platform(filename: str) -> None:
+    if not isinstance(filename, str) or not filename.endswith(".whl"):
+        raise RuntimeError(f"invalid wheel filename: {filename!r}")
+    try:
+        _prefix, python_tag, abi_tag, platform = filename[:-4].rsplit("-", 3)
+    except ValueError as error:
+        raise RuntimeError(f"invalid wheel filename: {filename!r}") from error
+    platform_tags = set(platform.split("."))
+    if abi_tag == "none" and platform_tags == {"any"}:
+        return
+    if python_tag != "cp312" or abi_tag != "cp312":
+        raise RuntimeError(f"unsupported binary wheel tags: {filename}")
+    if not platform_tags.intersection(COMPATIBLE_LINUX_TAGS):
+        raise RuntimeError(
+            f"binary wheel requires a glibc floor newer than glibc 2.17: {filename}"
+        )
+
+
 def load_manifest(path: Path) -> dict:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if payload.get("schema_version") != "turner2018-wheelhouse-v1":
         raise RuntimeError("unsupported wheelhouse manifest schema")
     _validate_smoke_import(payload)
+    packages = payload.get("packages")
+    if not isinstance(packages, list):
+        raise RuntimeError("packages must be a list")
+    for package in packages:
+        if not isinstance(package, dict):
+            raise RuntimeError("package entries must be objects")
+        _validate_wheel_platform(package.get("filename"))
     return payload
 
 
@@ -90,7 +119,8 @@ def verify_lock(lock_path: Path, manifest: dict) -> list[str]:
             (
                 candidate
                 for candidate in actual.get("wheels", [])
-                if candidate["url"].endswith(expected["filename"])
+                if candidate["url"] == expected["url"]
+                and candidate["url"].endswith(expected["filename"])
             ),
             None,
         )
@@ -171,6 +201,10 @@ def run_isolated_smoke(python: str, manifest: dict) -> dict:
 
 def prepare_wheelhouse(wheelhouse: Path, manifest: dict) -> None:
     wheelhouse.mkdir(parents=True, exist_ok=True)
+    expected_names = {package["filename"] for package in manifest["packages"]}
+    for path in wheelhouse.glob("*.whl"):
+        if path.name not in expected_names:
+            path.unlink()
     for package in manifest["packages"]:
         target = wheelhouse / package["filename"]
         if target.is_file() and _sha256(target) == package["sha256"]:

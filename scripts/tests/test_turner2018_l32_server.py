@@ -1298,8 +1298,13 @@ class TurnerL32SlurmTests(unittest.TestCase):
         self.assertIn("--check-runtime", text)
         self.assertIn("--stage all", text.replace("\n", " "))
         self.assertEqual(
-            manifest["smoke_import"]["expected_versions"]["matplotlib"],
-            "3.11.1",
+            manifest["smoke_import"]["expected_versions"],
+            {
+                "numpy": "2.2.6",
+                "scipy": "1.15.3",
+                "h5py": "3.14.0",
+                "matplotlib": "3.10.9",
+            },
         )
         self.assertLess(
             text.index("--check-runtime"),

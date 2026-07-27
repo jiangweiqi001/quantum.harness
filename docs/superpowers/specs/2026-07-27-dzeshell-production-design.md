@@ -49,6 +49,22 @@ are immutable per size class so the submitted request cannot disagree with
   installation. Runtime fingerprints and artifact manifests remain mandatory.
 - The 25 GB HOME filesystem is never used for production eigensystems.
 
+### CentOS 7 binary compatibility
+
+Dzeshell login and compute nodes use glibc 2.17. Every binary wheel in the
+offline runtime must therefore carry a `manylinux2014_x86_64` or equivalent
+`manylinux_2_17_x86_64` tag. The reproducible Python 3.12 numerical stack is
+locked to NumPy 2.2.6, SciPy 1.15.3, h5py 3.14.0, and Matplotlib 3.10.9.
+ContourPy 1.3.2 and Pillow 12.2.0 provide the corresponding compatible
+transitive binaries; pure-Python dependencies remain at their lock-selected
+versions. The manifest records exact filenames, URLs, and SHA-256 values from
+the updated lock.
+
+Preparation must reject wheels requiring a newer glibc baseline. Verification
+has three gates: a local exact-set/install/import smoke test, installation on
+the Dzeshell login node, and the same runtime import/version check inside a
+non-computing Slurm smoke job. A real ED job cannot start unless all gates pass.
+
 ## Submission safety
 
 Configuration may create remote directories, synchronize code/environment, and

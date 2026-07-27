@@ -237,9 +237,13 @@ probe-confirmed `--gres` value to `scnet_args`; do not guess it. These commands
 are probes or test-only validation, not authorization for a real submission.
 
 The Task 6 offline wheelhouse is a local, gitignored staging artifact for
-CPython 3.12 on manylinux x86_64. The tracked manifest records exact filenames,
-versions, platform tags, PyPI SHA-256 values, the lock hash, and the smoke-test
-schema. Prepare or re-verify the binaries with the tracked tool:
+CPython 3.12 on Dzeshell's CentOS 7/glibc 2.17 runtime. Every binary is an
+x86-64 `manylinux2014`/`manylinux_2_17` wheel; pure-Python wheels remain
+portable. The runtime pins NumPy 2.2.6, SciPy 1.15.3, h5py 3.14.0, and
+Matplotlib 3.10.9. The tracked manifest records the exact lock-sourced
+filenames, URLs, versions, platform tags, SHA-256 values, lock hash, and
+declarative smoke-test schema. Preparation rejects binary wheels with a newer
+glibc floor. Prepare or re-verify the binaries with the tracked tool:
 
 ```bash
 .venv/bin/python scripts/turner2018_wheelhouse.py --prepare --smoke

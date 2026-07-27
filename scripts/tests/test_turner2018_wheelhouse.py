@@ -10,6 +10,7 @@ import pytest
 import turner2018_wheelhouse as wheelhouse
 from turner2018_wheelhouse import (
     load_manifest,
+    prepare_wheelhouse,
     smoke_install,
     verify_lock,
     verify_wheelhouse,
@@ -33,6 +34,17 @@ EXPECTED_PACKAGES = {
     "scipy",
     "six",
 }
+EXPECTED_CORE_VERSIONS = {
+    "numpy": "2.2.6",
+    "scipy": "1.15.3",
+    "h5py": "3.14.0",
+    "matplotlib": "3.10.9",
+}
+EXPECTED_COMPATIBILITY_VERSIONS = {
+    **EXPECTED_CORE_VERSIONS,
+    "contourpy": "1.3.2",
+    "pillow": "12.2.0",
+}
 
 
 def test_wheel_manifest_matches_uv_lock_versions_and_hashes():
@@ -53,7 +65,65 @@ def test_wheel_manifest_matches_uv_lock_versions_and_hashes():
             for wheel in entry["wheels"]
             if wheel["url"].endswith(package["filename"])
         )
+        assert package["url"] == wheel["url"]
         assert wheel["hash"] == f"sha256:{package['sha256']}"
+
+
+def test_lock_verifier_rejects_manifest_url_not_in_lock():
+    manifest = load_manifest(MANIFEST)
+    manifest["packages"][0]["url"] = (
+        f"https://example.invalid/{manifest['packages'][0]['filename']}"
+    )
+
+    assert verify_lock(REPO / "uv.lock", manifest) == [
+        f"locked wheel mismatch: {manifest['packages'][0]['name']}"
+    ]
+
+
+def test_manifest_pins_dzeshell_core_versions_and_compatible_wheels():
+    manifest = load_manifest(MANIFEST)
+    assert manifest["platform"] == "manylinux2014_x86_64"
+    assert manifest["smoke_import"]["expected_versions"] == EXPECTED_CORE_VERSIONS
+    versions = {
+        package["name"]: package["version"] for package in manifest["packages"]
+    }
+    assert {
+        name: versions[name] for name in EXPECTED_COMPATIBILITY_VERSIONS
+    } == EXPECTED_COMPATIBILITY_VERSIONS
+    for package in manifest["packages"]:
+        filename = package["filename"]
+        if filename.endswith("-none-any.whl"):
+            continue
+        assert (
+            "manylinux2014_x86_64" in filename
+            or "manylinux_2_17_x86_64" in filename
+        ), filename
+
+
+def test_manifest_rejects_binary_wheel_above_glibc_2_17(tmp_path):
+    manifest = json.loads(MANIFEST.read_text())
+    package = manifest["packages"][0]
+    package["filename"] = "synthetic-1.0-cp312-cp312-manylinux_2_28_x86_64.whl"
+    package["url"] = f"https://example.invalid/{package['filename']}"
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RuntimeError, match="glibc 2.17"):
+        load_manifest(path)
+
+
+def test_manifest_accepts_dual_tag_with_compatible_manylinux_floor(tmp_path):
+    manifest = json.loads(MANIFEST.read_text())
+    package = manifest["packages"][0]
+    package["filename"] = (
+        "synthetic-1.0-cp312-cp312-"
+        "manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+    )
+    package["url"] = f"https://example.invalid/{package['filename']}"
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+
+    load_manifest(path)
 
 
 def test_manifest_smoke_import_is_declarative_and_version_complete():
@@ -123,6 +193,15 @@ def test_wheelhouse_verifier_rejects_unexpected_compatible_wheel(tmp_path):
     assert any("unexpected wheel" in error and extra.name in error for error in errors)
 
 
+def test_prepare_prunes_wheels_outside_exact_manifest_set(tmp_path):
+    extra = tmp_path / "stale-1.0-py3-none-any.whl"
+    extra.write_bytes(b"stale")
+
+    prepare_wheelhouse(tmp_path, {"packages": []})
+
+    assert not extra.exists()
+
+
 def test_smoke_install_uses_declarative_command_without_downloaded_wheels(
     tmp_path, monkeypatch
 ):
@@ -178,7 +257,7 @@ def test_generated_isolated_smoke_imports_matplotlib_and_checks_exact_versions()
 
 def test_runtime_check_uses_manifest_python_and_exact_package_versions():
     manifest = load_manifest(MANIFEST)
-    assert manifest["smoke_import"]["expected_versions"]["matplotlib"] == "3.11.1"
+    assert manifest["smoke_import"]["expected_versions"] == EXPECTED_CORE_VERSIONS
     assert "matplotlib" in manifest["smoke_import"]["modules"]
     assert wheelhouse.check_runtime(
         manifest,
@@ -198,7 +277,7 @@ def test_runtime_check_uses_manifest_python_and_exact_package_versions():
         manifest,
         python_version=(3, 12),
         package_versions=wrong,
-    ) == ["package version mismatch: numpy expected 2.4.6, found 0.0.0"]
+    ) == ["package version mismatch: numpy expected 2.2.6, found 0.0.0"]
 
 
 def test_check_runtime_imports_declarative_modules(monkeypatch):
