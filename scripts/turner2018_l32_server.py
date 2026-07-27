@@ -1000,15 +1000,97 @@ def _validate_fig3_shell_selection(
             raise RuntimeError(f"{failure}: FSA normalization")
 
     per_length = metrics.get("lengths", {}).get(str(length))
-    if per_length is not None:
-        fsa = per_length.get("fsa", {})
+    if not isinstance(per_length, dict):
+        raise RuntimeError(f"{failure}: missing per-length source evidence")
+    fsa = per_length.get("fsa", {})
+    if (
+        fsa.get("full_fsa_shell_count") != length + 1
+        or fsa.get("plotted_folded_shell_count") != plotted_count
+        or fsa.get("folding") != folding
+        or fsa.get("selected_states") != selected
+    ):
+        raise RuntimeError(f"{failure}: inconsistent per-length evidence")
+
+    source_prefix = f"selection_L{length}_"
+    try:
+        energies = np.asarray(arrays[f"panel_a_L{length}_energies"])
+        amplitudes = np.asarray(
+            arrays[source_prefix + "exact_shell_amplitudes"]
+        )
+        hamiltonian = np.asarray(
+            arrays[source_prefix + "fsa_hamiltonian_sector"]
+        )
+        tower = np.asarray(arrays[source_prefix + "match_exact_indices"])
+    except KeyError as error:
+        raise RuntimeError(f"{failure}: missing NPZ source evidence") from error
+    if (
+        hashlib.sha256(amplitudes.tobytes()).hexdigest()
+        != fsa.get("shell_amplitudes_sha256")
+        or hashlib.sha256(hamiltonian.tobytes()).hexdigest()
+        != fsa.get("fsa_hamiltonian_sha256")
+        or hashlib.sha256(tower.astype(np.int64).tobytes()).hexdigest()
+        != fsa.get("match_indices_sha256")
+    ):
+        raise RuntimeError(f"{failure}: source evidence hash mismatch")
+    if (
+        fsa.get("match_exact_indices") != tower.tolist()
+        or fsa.get("match_fsa_indices") != list(range(plotted_count))
+        or fsa.get("shell_dimensions") != list(amplitudes.shape)
+    ):
+        raise RuntimeError(f"{failure}: source indices or dimensions mismatch")
+    fsa_energies, fsa_vectors = np.linalg.eigh(hamiltonian)
+    projection = np.abs(amplitudes.T @ fsa_vectors) ** 2
+    if (
+        not np.array_equal(
+            energies[tower],
+            np.asarray(fsa.get("match_exact_energies")),
+        )
+        or not np.array_equal(
+            fsa_energies,
+            np.asarray(fsa.get("fsa_energies")),
+        )
+        or not np.array_equal(
+            projection[tower, np.arange(plotted_count)],
+            np.asarray(fsa.get("match_strengths")),
+        )
+    ):
+        raise RuntimeError(f"{failure}: JSON source evidence mismatch")
+
+    from turner2018_fig3 import (
+        FSA_EIGENVALUE_GAP_TOLERANCE,
+        select_fig3_shell_panel_states,
+    )
+
+    try:
+        expected_states = select_fig3_shell_panel_states(
+            length=length,
+            energies=energies,
+            exact_shell_amplitudes=amplitudes,
+            fsa_hamiltonian_sector=hamiltonian,
+            matched_tower={"tower": tower},
+            zero_tolerance=1e-10,
+            fsa_gap_tolerance=FSA_EIGENVALUE_GAP_TOLERANCE,
+        )
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"{failure}: source selection cannot be reproduced") from error
+    expected_metadata = [
+        state.to_metadata_dict()
+        for state in expected_states
+    ]
+    if selected != expected_metadata or fsa.get("selected_states") != expected_metadata:
+        raise RuntimeError(f"{failure}: semantic selection mismatch")
+    for state in expected_states:
+        prefix = f"panel_{state.panel}_L{length}_"
         if (
-            fsa.get("full_fsa_shell_count") != length + 1
-            or fsa.get("plotted_folded_shell_count") != plotted_count
-            or fsa.get("folding") != folding
-            or fsa.get("selected_states") != selected
+            not np.array_equal(arrays[prefix + "shell"], state.shell)
+            or not np.array_equal(
+                arrays[prefix + "exact_weights"], state.exact_weights
+            )
+            or not np.array_equal(
+                arrays[prefix + "fsa_weights"], state.fsa_weights
+            )
         ):
-            raise RuntimeError(f"{failure}: inconsistent per-length evidence")
+            raise RuntimeError(f"{failure}: shell weights mismatch source evidence")
 
 
 def _accepted_figure(
@@ -1047,7 +1129,9 @@ def _accepted_figure(
                 {
                     name: np.asarray(arrays[name]).copy()
                     for name in array_names
-                    if name.startswith(("panel_b_", "panel_c_"))
+                    if name.startswith(
+                        ("panel_a_", "panel_b_", "panel_c_", "selection_")
+                    )
                 }
                 if label == "Fig. 3"
                 else {}

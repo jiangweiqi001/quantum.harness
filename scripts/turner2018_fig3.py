@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator, Mapping
 from contextlib import ExitStack
+from dataclasses import dataclass, fields
 import hashlib
 import json
 import os
@@ -51,6 +53,7 @@ REQUIRED_OBSERVABLES = {
     "overlap_z2",
     "participation_ratio",
 }
+FSA_EIGENVALUE_GAP_TOLERANCE = 1e-10
 
 
 def _sha256(path: Path) -> str:
@@ -642,6 +645,55 @@ def _configure_overlap_axis(panel: Any) -> None:
     panel.set_ylabel(r"$|\langle E|Z_2\rangle|^2$")
 
 
+@dataclass(frozen=True, slots=True)
+class Fig3ShellPanelState(Mapping[str, Any]):
+    """Immutable selected-state metadata plus read-only plot arrays."""
+
+    panel: str
+    role: str
+    exact_index: int
+    exact_energy: float
+    fsa_index: int
+    fsa_energy: float
+    match_strength: float
+    zero_tolerance: float
+    fsa_gap_tolerance: float
+    fsa_nearest_gap: float
+    full_fsa_shell_count: int
+    plotted_folded_shell_count: int
+    folding: str
+    exact_weight_sum: float
+    fsa_weight_sum: float
+    shell: np.ndarray
+    exact_weights: np.ndarray
+    fsa_weights: np.ndarray
+
+    def __post_init__(self) -> None:
+        for name in ("shell", "exact_weights", "fsa_weights"):
+            values = np.array(getattr(self, name), copy=True)
+            values.flags.writeable = False
+            object.__setattr__(self, name, values)
+
+    def __getitem__(self, key: str) -> Any:
+        if key not in {field.name for field in fields(self)}:
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def __iter__(self) -> Iterator[str]:
+        return (field.name for field in fields(self))
+
+    def __len__(self) -> int:
+        return len(fields(self))
+
+    def to_metadata_dict(self) -> dict[str, Any]:
+        """Return JSON-safe scalar metadata at the serialization boundary."""
+        return {
+            field.name: getattr(self, field.name)
+            for field in fields(self)
+            if field.name not in {"shell", "exact_weights", "fsa_weights"}
+        }
+
+
 def select_fig3_shell_panel_states(
     *,
     length: int,
@@ -650,7 +702,8 @@ def select_fig3_shell_panel_states(
     fsa_hamiltonian_sector: np.ndarray,
     matched_tower: dict[str, np.ndarray],
     zero_tolerance: float = 1e-10,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+    fsa_gap_tolerance: float = FSA_EIGENVALUE_GAP_TOLERANCE,
+) -> tuple[Fig3ShellPanelState, Fig3ShellPanelState]:
     """Select paper Fig. 3(b)(c) states and their folded-shell plot data."""
     if isinstance(length, (bool, np.bool_)) or not isinstance(length, (int, np.integer)):
         raise TypeError("length must be an even integer")
@@ -665,6 +718,14 @@ def select_fig3_shell_panel_states(
     ):
         raise ValueError("zero_tolerance must be finite and positive")
     zero_tolerance = float(zero_tolerance)
+    if (
+        isinstance(fsa_gap_tolerance, (bool, np.bool_))
+        or not np.isscalar(fsa_gap_tolerance)
+        or not np.isfinite(fsa_gap_tolerance)
+        or fsa_gap_tolerance <= 0
+    ):
+        raise ValueError("fsa_gap_tolerance must be finite and positive")
+    fsa_gap_tolerance = float(fsa_gap_tolerance)
 
     raw_energies = np.asarray(energies)
     if np.iscomplexobj(raw_energies):
@@ -706,15 +767,6 @@ def select_fig3_shell_panel_states(
         raise ValueError("matched tower index is out of bounds")
     if np.unique(tower).size != tower.size:
         raise ValueError("matched tower must be one-to-one without duplicates")
-    recomputed_tower = match_fsa_tower(amplitudes, fsa_vectors)
-    if not np.array_equal(tower, recomputed_tower):
-        raise ValueError("matched tower selector output is stale or inconsistent")
-    if "sorted_tower" in matched_tower:
-        expected_sorted = tower[np.argsort(energy_values[tower], kind="stable")]
-        recorded_sorted = np.asarray(matched_tower["sorted_tower"])
-        if not np.array_equal(recorded_sorted, expected_sorted):
-            raise ValueError("matched tower sorted indices are stale or inconsistent")
-
     lowest_position = min(
         range(tower.size),
         key=lambda index: (energy_values[tower[index]], int(tower[index])),
@@ -733,10 +785,36 @@ def select_fig3_shell_panel_states(
             int(tower[index]),
         ),
     )
+    selected_positions = (lowest_position, adjacent_position)
+    nearest_gaps = np.asarray(
+        [
+            min(
+                abs(fsa_energies[index] - fsa_energies[other])
+                for other in range(fsa_energies.size)
+                if other != index
+            )
+            for index in range(fsa_energies.size)
+        ],
+        dtype=np.float64,
+    )
+    if any(nearest_gaps[index] <= fsa_gap_tolerance for index in selected_positions):
+        raise ValueError(
+            "degenerate selected FSA eigenvalue cannot define an individual curve"
+        )
+
+    recomputed_tower = match_fsa_tower(amplitudes, fsa_vectors)
+    if not np.array_equal(tower, recomputed_tower):
+        raise ValueError("matched tower selector output is stale or inconsistent")
+    if "sorted_tower" in matched_tower:
+        expected_sorted = tower[np.argsort(energy_values[tower], kind="stable")]
+        recorded_sorted = np.asarray(matched_tower["sorted_tower"])
+        if not np.array_equal(recorded_sorted, expected_sorted):
+            raise ValueError("matched tower sorted indices are stale or inconsistent")
+
     shell = np.arange(plotted_shell_count, dtype=np.int64)
     folding = "k=0 inversion-even: n and L-n are symmetry-related"
 
-    def panel_data(panel: str, role: str, fsa_index: int) -> dict[str, Any]:
+    def panel_data(panel: str, role: str, fsa_index: int) -> Fig3ShellPanelState:
         exact_index = int(tower[fsa_index])
         exact_weights = np.asarray(
             np.abs(amplitudes[:, exact_index]) ** 2,
@@ -752,24 +830,26 @@ def select_fig3_shell_panel_states(
             raise ValueError("selected shell weights must be finite")
         projection = amplitudes[:, exact_index].conj() @ fsa_vectors[:, fsa_index]
         match_strength = float(np.abs(projection) ** 2)
-        return {
-            "panel": panel,
-            "role": role,
-            "exact_index": exact_index,
-            "exact_energy": float(energy_values[exact_index]),
-            "fsa_index": int(fsa_index),
-            "fsa_energy": float(fsa_energies[fsa_index]),
-            "match_strength": match_strength,
-            "zero_tolerance": zero_tolerance,
-            "full_fsa_shell_count": length + 1,
-            "plotted_folded_shell_count": plotted_shell_count,
-            "folding": folding,
-            "exact_weight_sum": float(np.sum(exact_weights)),
-            "fsa_weight_sum": float(np.sum(fsa_weights)),
-            "shell": shell.copy(),
-            "exact_weights": exact_weights,
-            "fsa_weights": fsa_weights,
-        }
+        return Fig3ShellPanelState(
+            panel=panel,
+            role=role,
+            exact_index=exact_index,
+            exact_energy=float(energy_values[exact_index]),
+            fsa_index=int(fsa_index),
+            fsa_energy=float(fsa_energies[fsa_index]),
+            match_strength=match_strength,
+            zero_tolerance=zero_tolerance,
+            fsa_gap_tolerance=fsa_gap_tolerance,
+            fsa_nearest_gap=float(nearest_gaps[fsa_index]),
+            full_fsa_shell_count=length + 1,
+            plotted_folded_shell_count=plotted_shell_count,
+            folding=folding,
+            exact_weight_sum=float(np.sum(exact_weights)),
+            fsa_weight_sum=float(np.sum(fsa_weights)),
+            shell=shell,
+            exact_weights=exact_weights,
+            fsa_weights=fsa_weights,
+        )
 
     return (
         panel_data("b", "lowest-matched-scar", lowest_position),
@@ -777,12 +857,8 @@ def select_fig3_shell_panel_states(
     )
 
 
-def _shell_panel_metadata(selection: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in selection.items()
-        if key not in {"shell", "exact_weights", "fsa_weights"}
-    }
+def _shell_panel_metadata(selection: Fig3ShellPanelState) -> dict[str, Any]:
+    return selection.to_metadata_dict()
 
 
 def render_independent_fig3(
@@ -845,6 +921,19 @@ def render_independent_fig3(
         for length in lengths
     }
     primary_selections = panel_selections[primary_length]
+    for length in lengths:
+        result = results[int(length)]
+        prefix = f"selection_L{int(length)}"
+        arrays[f"{prefix}_exact_shell_amplitudes"] = np.asarray(
+            result["exact_shell_amplitudes"]
+        )
+        arrays[f"{prefix}_fsa_hamiltonian_sector"] = np.asarray(
+            result["fsa_hamiltonian_sector"]
+        )
+        arrays[f"{prefix}_match_exact_indices"] = np.asarray(
+            result["selector"]["tower"],
+            dtype=np.int64,
+        )
     panel_titles = (
         "lowest scar-tower state",
         "scar-tower state adjacent to E=0",
@@ -1006,12 +1095,16 @@ def render_independent_fig3(
     panel_d.set_ylabel(r"$PR_2=\sum_\alpha |c_\alpha|^4$")
     panel_d.legend(fontsize=8)
     for label, panel in zip(("a", "b", "c", "d"), axes.ravel()):
+        x, y, horizontal_alignment = (
+            (0.98, 0.96, "right") if label == "c" else (0.02, 0.96, "left")
+        )
         panel.text(
-            0.02,
-            0.96,
+            x,
+            y,
             f"({label})",
             transform=panel.transAxes,
             va="top",
+            ha=horizontal_alignment,
             fontweight="bold",
         )
     figure.tight_layout()
@@ -1474,12 +1567,16 @@ def run_figure(
     panel_d.set_ylabel(r"$PR_2=\sum_\alpha |c_\alpha|^4$")
     panel_d.legend(fontsize=8)
     for label, panel in zip(("a", "b", "c", "d"), axes.ravel()):
+        x, y, horizontal_alignment = (
+            (0.98, 0.96, "right") if label == "c" else (0.02, 0.96, "left")
+        )
         panel.text(
-            0.02,
-            0.96,
+            x,
+            y,
             f"({label})",
             transform=panel.transAxes,
             va="top",
+            ha=horizontal_alignment,
             fontweight="bold",
         )
     figure.tight_layout()

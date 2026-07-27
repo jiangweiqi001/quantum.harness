@@ -348,7 +348,7 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             self.run_stage(output, "all")
-            fig3_artifact = output / "figures" / "fig3.png"
+            fig3_artifact = output / "figures" / "fig3_independent_L10.png"
             fig4_overview = output / "figures" / "fig4_independent_all.png"
             fig4_size = output / "figures" / "fig4_independent_L10.png"
 
@@ -489,19 +489,18 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                 return fig4_overview
 
             with mock.patch(
-                "turner2018_l32_server.FIG3_RENDERER_ADAPTER",
-                side_effect=lambda *_: render(fig3_artifact, b"fig3"),
-            ) as fig3_renderer, mock.patch(
                 "turner2018_l32_server.FIG4_RENDERER_ADAPTER",
                 side_effect=render_fig4,
             ) as fig4_renderer:
                 self.run_stage(output, "figures")
 
-            fig3_renderer.assert_called_once_with(output, 10)
             fig4_renderer.assert_called_once_with(output, 10)
             manifest = require_stage(output, "figures")
             summary = json.loads((output / manifest["artifact"]["path"]).read_text())
-            self.assertEqual(summary["fig3"]["sha256"], hashlib.sha256(b"fig3").hexdigest())
+            self.assertEqual(
+                summary["fig3"]["path"],
+                "figures/fig3_independent_L10.png",
+            )
             self.assertEqual(
                 summary["fig4"]["overview"]["sha256"],
                 hashlib.sha256(b"fig4-overview").hexdigest(),
@@ -542,7 +541,7 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             self.run_stage(output, "all")
-            fig3 = output / "figures" / "fig3.png"
+            fig3 = output / "figures" / "fig3_independent_L10.png"
             fig4 = output / "figures" / "fig4.png"
 
             def render(path, passed):
@@ -643,9 +642,6 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                 return path
 
             with mock.patch(
-                "turner2018_l32_server.FIG3_RENDERER_ADAPTER",
-                side_effect=lambda *_: render(fig3, True),
-            ), mock.patch(
                 "turner2018_l32_server.FIG4_RENDERER_ADAPTER",
                 side_effect=lambda *_: render(fig4, False),
             ):
@@ -687,130 +683,155 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "generation identity"):
                 server._accepted_figure(path, "Fig. 4", length=20)
 
-    def test_fig3_acceptance_rejects_stale_or_corrupt_shell_selection_metadata(self):
+    def test_figures_stage_never_skips_independently_corrupt_fig3_semantics(self):
         import numpy as np
-        import turner2018_l32_server as server
 
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "fig3_independent_L20.png"
-            npz = path.with_suffix(".npz")
-            path.write_bytes(b"png")
-            arrays = {
-                "generation_id": np.asarray("same-generation"),
-                "panel_b_L20_shell": np.arange(11),
-                "panel_b_L20_exact_weights": np.full(11, 0.04),
-                "panel_b_L20_fsa_weights": np.full(11, 1.0 / 11.0),
-                "panel_c_L20_shell": np.arange(11),
-                "panel_c_L20_exact_weights": np.full(11, 0.03),
-                "panel_c_L20_fsa_weights": np.full(11, 1.0 / 11.0),
+            output = Path(directory)
+            self.run_stage(output, "all")
+            self.run_stage(output, "figures")
+            figure = output / "figures" / "fig3_independent_L10.png"
+            metrics_path = figure.with_suffix(".json")
+            arrays_path = figure.with_suffix(".npz")
+            summary_path = output / "figures" / "manifest.json"
+            stage_path = output / "stages" / "figures.json"
+            originals = {
+                path: path.read_bytes()
+                for path in (metrics_path, arrays_path, summary_path, stage_path)
             }
-            np.savez(npz, **arrays)
-            selected = [
-                {
-                    "panel": "b",
-                    "role": "lowest-matched-scar",
-                    "exact_index": 4,
-                    "exact_energy": -4.2,
-                    "fsa_index": 0,
-                    "fsa_energy": -4.1,
-                    "match_strength": 0.44,
-                    "zero_tolerance": 1e-10,
-                    "full_fsa_shell_count": 21,
-                    "plotted_folded_shell_count": 11,
-                    "folding": (
-                        "k=0 inversion-even: n and L-n are symmetry-related"
-                    ),
-                    "exact_weight_sum": 0.44,
-                    "fsa_weight_sum": 1.0,
-                },
-                {
-                    "panel": "c",
-                    "role": "negative-adjacent-to-zero",
-                    "exact_index": 220,
-                    "exact_energy": -0.07,
-                    "fsa_index": 5,
-                    "fsa_energy": -0.06,
-                    "match_strength": 0.33,
-                    "zero_tolerance": 1e-10,
-                    "full_fsa_shell_count": 21,
-                    "plotted_folded_shell_count": 11,
-                    "folding": (
-                        "k=0 inversion-even: n and L-n are symmetry-related"
-                    ),
-                    "exact_weight_sum": 0.33,
-                    "fsa_weight_sum": 1.0,
-                },
-            ]
-            metrics = {
-                "source": "independent-ed",
-                "primary_length": 20,
-                "generation_id": "same-generation",
-                "selected_panel_states": selected,
-                "plot_conventions": {
-                    "panel_b": {
-                        "exact": "black circles, solid line",
-                        "fsa": "red crosses, dashed line",
-                        "x": "folded FSA shell index n=0..L/2",
-                        "y": "squared shell weight, linear",
-                    },
-                    "panel_c": {
-                        "exact": "black circles, solid line",
-                        "fsa": "red crosses, dashed line",
-                        "x": "folded FSA shell index n=0..L/2",
-                        "y": "squared shell weight, linear",
-                    },
-                },
-                "acceptance": {
-                    "passed": True,
-                    "generated_source": "independent-ed",
-                },
-                "generation_assets": {
-                    "png_sha256": hashlib.sha256(b"png").hexdigest(),
-                    "npz_sha256": hashlib.sha256(npz.read_bytes()).hexdigest(),
-                },
-            }
-            metrics_path = path.with_suffix(".json")
-            metrics_path.write_text(json.dumps(metrics))
+            with np.load(arrays_path, allow_pickle=False) as archive:
+                required_source_arrays = {
+                    "selection_L10_exact_shell_amplitudes",
+                    "selection_L10_fsa_hamiltonian_sector",
+                    "selection_L10_match_exact_indices",
+                }
+                self.assertTrue(required_source_arrays.issubset(archive.files))
 
-            accepted = server._accepted_figure(path, "Fig. 3", length=20)
-            self.assertEqual(accepted["generation_id"], "same-generation")
+            def json_mutation(field, value, panel=0):
+                def mutate(metrics, _arrays):
+                    metrics["selected_panel_states"][panel][field] = value(
+                        metrics["selected_panel_states"][panel][field]
+                    )
+
+                return mutate
+
+            def array_mutation(name, operation):
+                def mutate(_metrics, arrays):
+                    arrays[name] = operation(arrays[name].copy())
+
+                return mutate
 
             corruptions = (
-                ("stale length", lambda value: value.update(primary_length=18)),
+                ("exact index", json_mutation("exact_index", lambda value: value + 1)),
                 (
-                    "wrong shell count",
-                    lambda value: value["selected_panel_states"][0].update(
-                        plotted_folded_shell_count=21
+                    "FSA index",
+                    json_mutation("fsa_index", lambda value: (value + 1) % 6, panel=1),
+                ),
+                (
+                    "exact energy",
+                    json_mutation("exact_energy", lambda value: value + 0.125),
+                ),
+                (
+                    "FSA energy",
+                    json_mutation("fsa_energy", lambda value: value + 0.125, panel=1),
+                ),
+                (
+                    "match strength",
+                    json_mutation("match_strength", lambda value: value * 0.5),
+                ),
+                ("role", json_mutation("role", lambda _value: "interior-special", panel=1)),
+                (
+                    "full shell count",
+                    json_mutation("full_fsa_shell_count", lambda value: value + 1),
+                ),
+                (
+                    "folded shell count",
+                    json_mutation(
+                        "plotted_folded_shell_count", lambda value: value + 1, panel=1
                     ),
                 ),
                 (
-                    "wrong role",
-                    lambda value: value["selected_panel_states"][1].update(
-                        role="interior-special"
+                    "exact normalization",
+                    json_mutation("exact_weight_sum", lambda value: value + 0.1),
+                ),
+                (
+                    "FSA normalization",
+                    json_mutation("fsa_weight_sum", lambda _value: 0.9, panel=1),
+                ),
+                (
+                    "FSA nearest gap",
+                    json_mutation("fsa_nearest_gap", lambda value: value + 0.1),
+                ),
+                (
+                    "exact shell weights",
+                    array_mutation(
+                        "panel_b_L10_exact_weights", lambda values: np.roll(values, 1)
                     ),
                 ),
                 (
-                    "nonnegative adjacent",
-                    lambda value: value["selected_panel_states"][1].update(
-                        exact_energy=0.07
+                    "FSA shell weights",
+                    array_mutation(
+                        "panel_c_L10_fsa_weights", lambda values: np.roll(values, 1)
                     ),
                 ),
                 (
-                    "normalization mismatch",
-                    lambda value: value["selected_panel_states"][0].update(
-                        exact_weight_sum=0.9
+                    "exact amplitude source",
+                    array_mutation(
+                        "selection_L10_exact_shell_amplitudes",
+                        lambda values: values
+                        + np.eye(*values.shape, dtype=values.dtype) * 1e-4,
+                    ),
+                ),
+                (
+                    "FSA Hamiltonian source",
+                    array_mutation(
+                        "selection_L10_fsa_hamiltonian_sector",
+                        lambda values: values
+                        + np.eye(values.shape[0], dtype=values.dtype) * 1e-4,
+                    ),
+                ),
+                (
+                    "matched indices source",
+                    array_mutation(
+                        "selection_L10_match_exact_indices",
+                        lambda values: np.roll(values, 1),
                     ),
                 ),
             )
-            for label, corrupt in corruptions:
+
+            for label, mutate in corruptions:
                 with self.subTest(label=label):
-                    candidate = json.loads(json.dumps(metrics))
-                    corrupt(candidate)
-                    metrics_path.write_text(json.dumps(candidate))
+                    for path, payload in originals.items():
+                        path.write_bytes(payload)
+                    metrics = json.loads(metrics_path.read_text())
+                    with np.load(arrays_path, allow_pickle=False) as archive:
+                        arrays = {name: archive[name].copy() for name in archive.files}
+                    mutate(metrics, arrays)
+                    with arrays_path.open("wb") as handle:
+                        np.savez(handle, **arrays)
+                    metrics["generation_assets"]["npz_sha256"] = hashlib.sha256(
+                        arrays_path.read_bytes()
+                    ).hexdigest()
+                    metrics_path.write_text(json.dumps(metrics))
+
+                    summary = json.loads(summary_path.read_text())
+                    summary["fig3"]["metrics_sha256"] = hashlib.sha256(
+                        metrics_path.read_bytes()
+                    ).hexdigest()
+                    summary["fig3"]["arrays_sha256"] = hashlib.sha256(
+                        arrays_path.read_bytes()
+                    ).hexdigest()
+                    summary_path.write_text(json.dumps(summary))
+                    stage = json.loads(stage_path.read_text())
+                    stage["artifact"]["sha256"] = hashlib.sha256(
+                        summary_path.read_bytes()
+                    ).hexdigest()
+                    stage_path.write_text(json.dumps(stage))
+
                     with self.assertRaisesRegex(
-                        RuntimeError, "Fig. 3.*selection|shell|length|normalization"
+                        RuntimeError, "Fig. 3.*selection|semantic|source evidence"
                     ):
-                        server._accepted_figure(path, "Fig. 3", length=20)
+                        self.run_stage(output, "figures")
 
     def test_production_fig4_gate_requires_accepted_statistics(self):
         import numpy as np

@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+from dataclasses import FrozenInstanceError, is_dataclass
 from zipfile import ZipFile
 
 import h5py
@@ -104,9 +105,51 @@ def test_shell_panel_selector_uses_lowest_and_negative_adjacent_matched_states()
     assert panel_b["match_strength"] == pytest.approx(0.64)
     assert panel_c["exact_energy"] == pytest.approx(-1.0)
     assert panel_b["fsa_index"] != panel_b["exact_index"]
+    assert panel_b["fsa_gap_tolerance"] == pytest.approx(1e-10)
+    assert panel_b["fsa_nearest_gap"] > panel_b["fsa_gap_tolerance"]
+    assert panel_c["fsa_nearest_gap"] > panel_c["fsa_gap_tolerance"]
     np.testing.assert_array_equal(
         panel_b["shell"], np.arange(inputs["length"] // 2 + 1)
     )
+
+
+def test_shell_panel_selector_result_is_structurally_immutable():
+    panel_b, _panel_c = fig3.select_fig3_shell_panel_states(
+        **_synthetic_shell_panel_inputs()
+    )
+
+    assert is_dataclass(panel_b)
+    with pytest.raises(FrozenInstanceError):
+        panel_b.role = "changed"
+    with pytest.raises(ValueError, match="read-only"):
+        panel_b.shell[0] = 99
+    metadata = panel_b.to_metadata_dict()
+    metadata["role"] = "changed-at-serialization-boundary"
+    assert panel_b.role == "lowest-matched-scar"
+
+
+def test_shell_panel_selector_rejects_rotated_degenerate_selected_fsa_basis(
+    monkeypatch,
+):
+    inputs = _synthetic_shell_panel_inputs()
+    original_eigh = np.linalg.eigh
+    _energies, baseline_vectors = original_eigh(inputs["fsa_hamiltonian_sector"])
+    degenerate_energies = np.asarray([0.0, 0.0, 1.0, 2.0])
+
+    for angle in (0.0, np.pi / 7.0):
+        rotation = np.eye(4)
+        rotation[:2, :2] = [
+            [np.cos(angle), -np.sin(angle)],
+            [np.sin(angle), np.cos(angle)],
+        ]
+        rotated_vectors = baseline_vectors @ rotation
+        monkeypatch.setattr(
+            fig3.np.linalg,
+            "eigh",
+            lambda _matrix, e=degenerate_energies, v=rotated_vectors: (e, v),
+        )
+        with pytest.raises(ValueError, match="degenerate.*FSA eigenvalue"):
+            fig3.select_fig3_shell_panel_states(**inputs)
 
 
 @pytest.mark.parametrize(("length", "plotted"), [(20, 11), (32, 17)])
@@ -288,6 +331,11 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
                 "title": panel.get_title(),
                 "xlabel": panel.get_xlabel(),
                 "ylabel": panel.get_ylabel(),
+                "panel_label_position": next(
+                    text.get_position()
+                    for text in panel.texts
+                    if text.get_text() == f"({label})"
+                ),
                 "lines": [
                     {
                         "color": line.get_color(),
@@ -334,16 +382,40 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
         np.testing.assert_allclose(
             sidecar["panel_d_special"], [independent["special_mean"]]
         )
-        selected_panels = fig3.select_fig3_shell_panel_states(
-            length=10,
-            energies=independent["energies"],
-            exact_shell_amplitudes=independent["exact_shell_amplitudes"],
-            fsa_hamiltonian_sector=independent["fsa_hamiltonian_sector"],
-            matched_tower=independent["selector"],
+        np.testing.assert_array_equal(
+            sidecar["selection_L10_exact_shell_amplitudes"],
+            independent["exact_shell_amplitudes"],
         )
-        for panel, selection in zip(("b", "c"), selected_panels):
-            exact_index = selection["exact_index"]
-            fsa_index = selection["fsa_index"]
+        np.testing.assert_array_equal(
+            sidecar["selection_L10_fsa_hamiltonian_sector"],
+            independent["fsa_hamiltonian_sector"],
+        )
+        np.testing.assert_array_equal(
+            sidecar["selection_L10_match_exact_indices"],
+            independent["selector"]["tower"],
+        )
+        tower = np.asarray(independent["selector"]["tower"])
+        expected_b_fsa = min(
+            range(len(tower)),
+            key=lambda index: (
+                independent["energies"][tower[index]],
+                int(tower[index]),
+            ),
+        )
+        negative_fsa = [
+            index
+            for index, exact_index in enumerate(tower)
+            if independent["energies"][exact_index] < -1e-10
+        ]
+        expected_c_fsa = min(
+            negative_fsa,
+            key=lambda index: (
+                abs(independent["energies"][tower[index]]),
+                int(tower[index]),
+            ),
+        )
+        for panel, fsa_index in zip(("b", "c"), (expected_b_fsa, expected_c_fsa)):
+            exact_index = int(tower[fsa_index])
             np.testing.assert_allclose(
                 sidecar[f"panel_{panel}_L10_exact_weights"],
                 np.abs(
@@ -374,6 +446,9 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
             assert len(exact_line["x"]) == len(fsa_line["x"]) == 6
         assert "lowest scar-tower state" in rendered_panels["b"]["title"]
         assert "scar-tower state adjacent to E=0" in rendered_panels["c"]["title"]
+        assert rendered_panels["c"]["panel_label_position"] != pytest.approx(
+            (0.02, 0.96)
+        )
 
     metrics = json.loads(figure_path.with_suffix(".json").read_text())
     assert metrics["generation_id"] == sidecar_generation
@@ -1041,14 +1116,74 @@ def test_legacy_official_l32_shell_panels_use_seventeen_folded_points(
 
     def inspect_panels(figure, *args, **kwargs):
         for label, panel in zip(("b", "c"), figure.axes[1:3]):
-            captured[label] = [np.asarray(line.get_xdata()) for line in panel.lines]
+            captured[label] = {
+                "title": panel.get_title(),
+                "lines": [
+                    {
+                        "x": np.asarray(line.get_xdata()),
+                        "y": np.asarray(line.get_ydata()),
+                        "color": line.get_color(),
+                        "marker": line.get_marker(),
+                        "linestyle": line.get_linestyle(),
+                        "label": line.get_label(),
+                    }
+                    for line in panel.lines
+                ],
+                "panel_label_position": next(
+                    text.get_position()
+                    for text in panel.texts
+                    if text.get_text() == f"({label})"
+                ),
+            }
         return original_savefig(figure, *args, **kwargs)
 
     monkeypatch.setattr(plt.Figure, "savefig", inspect_panels)
 
     fig3.run_figure(10, output_dir=tmp_path, official_data_dir=official_root)
 
-    for panel in ("b", "c"):
-        assert len(captured[panel]) == 2
-        assert all(len(x) == 17 for x in captured[panel])
-        np.testing.assert_array_equal(captured[panel][0], np.arange(17))
+    tower = np.asarray(fixture["matched_tower"]["tower"])
+    expected_b_fsa = min(
+        range(len(tower)),
+        key=lambda index: (fixture["energies"][tower[index]], int(tower[index])),
+    )
+    expected_c_fsa = min(
+        (
+            index
+            for index, exact_index in enumerate(tower)
+            if fixture["energies"][exact_index] < -1e-10
+        ),
+        key=lambda index: (
+            abs(fixture["energies"][tower[index]]),
+            int(tower[index]),
+        ),
+    )
+    for panel, role, fsa_index in (
+        ("b", "lowest scar-tower state", expected_b_fsa),
+        ("c", "scar-tower state adjacent to E=0", expected_c_fsa),
+    ):
+        exact_index = int(tower[fsa_index])
+        record = captured[panel]
+        assert role in record["title"]
+        assert f"E={fixture['energies'][exact_index]:.2f}" in record["title"]
+        assert len(record["lines"]) == 2
+        exact_line, fsa_line = record["lines"]
+        np.testing.assert_array_equal(exact_line["x"], np.arange(17))
+        np.testing.assert_allclose(
+            exact_line["y"],
+            np.abs(fixture["exact_shell_amplitudes"][:, exact_index]) ** 2,
+        )
+        np.testing.assert_allclose(
+            fsa_line["y"], np.abs(fsa_vectors[:, fsa_index]) ** 2
+        )
+        assert (exact_line["color"], exact_line["marker"], exact_line["linestyle"]) == (
+            "black",
+            "o",
+            "-",
+        )
+        assert (fsa_line["color"], fsa_line["marker"], fsa_line["linestyle"]) == (
+            "red",
+            "x",
+            "--",
+        )
+        assert (exact_line["label"], fsa_line["label"]) == ("exact", "FSA")
+    assert captured["c"]["panel_label_position"] != pytest.approx((0.02, 0.96))
