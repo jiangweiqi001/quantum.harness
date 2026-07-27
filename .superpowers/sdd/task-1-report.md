@@ -467,3 +467,131 @@ Exact sidecar evidence:
 - Official DOI archives remain unavailable in this worktree; official tests
   requiring them are skipped, while deterministic official-path fixtures pass.
 - Independent L=32 rendering still requires the independent L=32 eigensystem.
+
+---
+
+## Final re-review remediation
+
+### Correct RED evidence
+The two final review behaviors were tested before production changes.
+
+Immutable result RED:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_fig3.py::test_shell_panel_selector_result_is_structurally_immutable -q
+```
+Failed because `panel_b.shell` was an owned NumPy array rather than a tuple,
+so `isinstance(stored, tuple)` was false.
+
+Coordinated rewrite RED:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_l32_server.py::TurnerRestartWorkflowTests::test_figures_stage_rejects_coordinated_fig3_rewrite_against_upstream -q
+```
+Result:
+```text
+1 failed in 1.60s
+AssertionError: RuntimeError not raised
+```
+
+The adversarial test shifted the copied eigensystem energies, rescaled copied
+exact shell amplitudes, shifted the copied FSA Hamiltonian, recomputed every
+selected state/weight/match/normalization field, and refreshed the Fig. 3
+NPZ/JSON asset hashes, combined figures manifest hashes, and figures-stage
+artifact hash. The unchanged validated upstream artifacts remained intact.
+Before the fix this coordinated rewrite was accepted and the stage skipped.
+
+### Implementation
+- `Fig3ShellPanelState.shell`, `.exact_weights`, and `.fsa_weights` are now
+  immutable tuples of Python scalars. The frozen dataclass normalizes all
+  constructor inputs to tuples.
+- Tests prove tuple item assignment is impossible, no stored object exposes
+  `setflags`, and a mutable NumPy conversion can be changed without affecting
+  the stored result.
+- Both independent and official render paths create renderer-local NumPy
+  arrays from those tuples.
+- Fig. 3 acceptance now reopens the Task 6 result through the existing stable
+  validated snapshot chain. It validates current stage manifests/artifact
+  hashes and stable open handles, reads eigensystem energies plus persisted
+  observables, and accesses eigenvector metadata only.
+- The complete sidecar `source_hashes` map must exactly equal the current
+  upstream snapshot hashes.
+- Sidecar energies, exact shell amplitudes, FSA Hamiltonian, and matched tower
+  must exactly equal the current upstream arrays.
+- Selection roles, indices, energies, gaps, weights, matches, shell counts,
+  and normalization are recomputed from the upstream arrays and compared to
+  every NPZ/JSON value.
+- The coordinated rewrite test patches HDF5 eigenvector indexing to fail,
+  proving semantic restart validation never materializes eigenvectors.
+
+### GREEN and regression evidence
+Targeted GREEN:
+```text
+2 passed in 1.48s
+```
+
+Standalone coordinated-attack regression:
+```text
+1 passed in 1.62s
+```
+
+Focused suite:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_fig3.py \
+  scripts/tests/test_turner2018_l32_server.py \
+  scripts/tests/test_turner2018_official.py -q
+```
+```text
+115 passed, 4 skipped, 50 subtests passed in 25.43s
+```
+
+Full regression:
+```bash
+.venv/bin/python -m pytest scripts/tests -q
+```
+```text
+643 passed, 11 skipped, 50 subtests passed in 97.03s
+```
+
+`py_compile`, `git diff --check`, and IDE lint inspection passed without
+errors.
+
+### Real L=20 rerender/restart evidence
+Current-fingerprint L=20 computational stages and figures were rebuilt.
+The immediate restart then reported:
+```text
+skipped stage=plan
+skipped stage=figures
+```
+
+Inspected image:
+`tracks/ed/results/turner-2018/task7-independent/L20/figures/fig3_independent_L20.png`
+
+Visual inspection confirmed unchanged curves/data and the non-overlapping
+panel `(c)` label. Programmatic inspection reported
+`source_hashes_match True`, 11 plotted folded shells in each panel, and:
+- panel (b) exact/FSA sums:
+  `0.9819602717783971` / `1.0000000000000004`;
+- panel (c) exact/FSA sums:
+  `0.788540937730373` / `1.0`.
+
+Selected indices, energies, matches, and gaps remained:
+- panel (b): exact `0`, `-12.07121376222543`; FSA `0`,
+  `-12.017010493123097`; match `0.9818818789488396`; gap
+  `1.993766660882546`;
+- panel (c): exact `101`, `-2.672092951313271`; FSA `4`,
+  `-2.633527459988426`; match `0.7878643145131315`; gap
+  `2.5886606403076566`.
+
+### Commit
+- Final implementation:
+  `c26c71f89b40ad1679bb89c394e0877c913623ff`
+- Subject: `Bind Fig. 3 evidence upstream`
+- This report append is committed separately so the implementation hash can be
+  recorded exactly.
+
+### Remaining concerns
+- Official DOI archives remain unavailable locally; their integration tests
+  are skipped while deterministic official fixtures pass.
+- Independent L=32 rendering still requires the independent L=32 eigensystem.
