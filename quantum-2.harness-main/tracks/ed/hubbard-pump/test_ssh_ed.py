@@ -1,6 +1,11 @@
+from __future__ import annotations
+
+import csv
+import json
+
 import numpy as np
 
-from run_ssh_ed import diagonalize_ssh
+from run_ssh_ed import diagonalize_ssh, write_artifacts
 
 
 def test_l8_single_particle_sector_has_eight_states():
@@ -25,3 +30,16 @@ def test_two_lowest_absolute_energy_states_are_edge_mode_candidates():
     edge_weights = np.asarray(diagnostics["edge_weights"])
     assert len(edge_weights) == 8
     assert np.array_equal(np.argsort(edge_weights)[-2:], candidate_indices)
+
+
+def test_write_artifacts_creates_plot_table_and_manifest(tmp_path):
+    files = write_artifacts(tmp_path)
+    assert set(files) == {"plot", "energies", "manifest"}
+    assert (tmp_path / "ssh_spectrum_dos.png").is_file()
+    with (tmp_path / "energies.csv").open() as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 8
+    assert sum(row["is_edge_candidate"] == "True" for row in rows) == 2
+    manifest = json.loads((tmp_path / "run_manifest.json").read_text())
+    assert manifest["parameters"] == {"L": 8, "Nf": 1, "boundary": "OBC", "t1": 0.6, "t2": 1.0}
+    assert manifest["diagnostics"]["basis_dimension"] == 8
