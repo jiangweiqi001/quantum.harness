@@ -23,6 +23,8 @@ from turner2018_l32_server import (  # noqa: E402
     L32_SECTOR_DIMENSION,
     SYMMETRY_FOLDED_FSA_SHELLS,
     atomic_write_json,
+    build_execution_fingerprint,
+    build_plan,
     dense_resource_estimate,
     main,
     parse_memory_bytes,
@@ -41,6 +43,20 @@ class TurnerL32PlanTests(unittest.TestCase):
         self.assertEqual(SYMMETRY_FOLDED_FSA_SHELLS, 17)
         self.assertEqual(estimate["bytes_per_dense_array"], 47_970_672_768)
         self.assertAlmostEqual(estimate["gb_per_dense_array"], 47.970672768)
+
+    def test_plan_has_dense_estimates_for_all_production_lengths(self):
+        for length, dimension in ((28, 13_201), (30, 31_836), (32, 77_436)):
+            with self.subTest(length=length):
+                plan = build_plan(length, Path("."), [])
+                self.assertEqual(plan["basis"]["sector_dimension"], dimension)
+                self.assertGreater(plan["resources"]["minimum_requested_bytes"], 0)
+
+    def test_execution_fingerprint_is_exact_and_checkout_scoped(self):
+        fingerprint = build_execution_fingerprint()
+        self.assertEqual(fingerprint["python"], [3, 12])
+        self.assertEqual(set(fingerprint["packages"]), {"numpy", "scipy", "h5py"})
+        self.assertIn("turner2018_ed_artifacts.py", fingerprint["sources"])
+        self.assertEqual(len(fingerprint["uv_lock_sha256"]), 64)
 
     def test_atomic_json_write_leaves_no_partial_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -272,6 +288,47 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             (output / "stages" / "observables.json").unlink()
             with self.assertRaisesRegex(RuntimeError, "hamiltonian.*sha256"):
                 self.run_stage(output, "observables")
+
+    def test_changed_execution_fingerprint_prevents_old_stage_skips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "all")
+            changed = json.loads(json.dumps(build_execution_fingerprint()))
+            changed["sources"]["turner2018_ed_engine.py"] = "f" * 64
+            with mock.patch(
+                "turner2018_l32_server.build_execution_fingerprint",
+                return_value=changed,
+            ):
+                code, restarted = self.run_stage(output, "all")
+            self.assertEqual(code, 0)
+            for stage in (
+                "plan",
+                "basis",
+                "hamiltonian",
+                "diagonalize",
+                "observables",
+                "validate",
+            ):
+                self.assertIn(f"completed stage={stage}", restarted)
+
+    def test_recursive_validation_hashes_eigensystem_once_per_invocation(self):
+        import turner2018_ed_artifacts as artifacts
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "all")
+            original = artifacts._sha256
+            count = 0
+
+            def counting_sha(path):
+                nonlocal count
+                if Path(path).name == "eigensystem.h5":
+                    count += 1
+                return original(path)
+
+            with mock.patch.object(artifacts, "_sha256", counting_sha):
+                self.run_stage(output, "all")
+            self.assertEqual(count, 1)
 
     def test_eigensystem_and_observables_are_separate_files(self):
         with tempfile.TemporaryDirectory() as directory:

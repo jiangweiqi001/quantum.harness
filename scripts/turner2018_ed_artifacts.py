@@ -208,12 +208,17 @@ def _backup_previous_stage_state(
     manifest_backup = manifest_path.with_name(manifest_path.name + ".backup")
     _cleanup_temp(artifact_backup)
     _cleanup_temp(manifest_backup)
-    if artifact_path.is_file():
-        os.link(artifact_path, artifact_backup)
-        _fsync_parent_directory(artifact_backup)
-    if manifest_path.is_file():
-        os.link(manifest_path, manifest_backup)
-        _fsync_parent_directory(manifest_backup)
+    try:
+        if artifact_path.is_file():
+            os.link(artifact_path, artifact_backup)
+            _fsync_parent_directory(artifact_backup)
+        if manifest_path.is_file():
+            os.link(manifest_path, manifest_backup)
+            _fsync_parent_directory(manifest_backup)
+    except Exception:
+        _cleanup_temp(artifact_backup)
+        _cleanup_temp(manifest_backup)
+        raise
     return True
 
 
@@ -254,9 +259,14 @@ def _publish_stage_transactional(
     plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     manifest_path = output_dir / "stages" / f"{stage}.json"
-    had_previous = _backup_previous_stage_state(
-        output_dir, stage, artifact_path
-    )
+    try:
+        had_previous = _backup_previous_stage_state(
+            output_dir, stage, artifact_path
+        )
+    except Exception:
+        _cleanup_temp(artifact_path.with_name(artifact_path.name + ".backup"))
+        _cleanup_temp(manifest_path.with_name(manifest_path.name + ".backup"))
+        raise
     try:
         write_artifact()
         artifact = build_artifact()

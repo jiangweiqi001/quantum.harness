@@ -143,6 +143,34 @@ def test_transactional_rollback_never_reads_giant_artifacts_into_memory(
     validate_stage(output_dir, "eigensystem")
 
 
+def test_second_backup_link_failure_cleans_first_and_preserves_fixed_files(
+    tmp_path, monkeypatch
+):
+    write_eigensystem(tmp_path, energies=np.asarray([0.0]), vectors=np.eye(1))
+    artifact = tmp_path / "eigensystem.h5"
+    manifest = tmp_path / "stages" / "eigensystem.json"
+    artifact_sha = artifacts._sha256(artifact)
+    manifest_bytes = manifest.read_bytes()
+    original_link = artifacts.os.link
+    calls = 0
+
+    def fail_second_link(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected second backup link failure")
+        return original_link(source, destination)
+
+    monkeypatch.setattr(artifacts.os, "link", fail_second_link)
+    with pytest.raises(OSError, match="second backup"):
+        write_eigensystem(tmp_path, energies=np.asarray([1.0]), vectors=np.eye(1))
+
+    assert artifacts._sha256(artifact) == artifact_sha
+    assert manifest.read_bytes() == manifest_bytes
+    assert not (tmp_path / "eigensystem.h5.backup").exists()
+    assert not (tmp_path / "stages" / "eigensystem.json.backup").exists()
+
+
 def test_validate_stage_enforces_schema_metadata_inputs_and_hdf5_structure(tmp_path):
     output_dir = tmp_path
     write_eigensystem(

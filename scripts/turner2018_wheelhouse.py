@@ -52,6 +52,10 @@ def verify_lock(lock_path: Path, manifest: dict) -> list[str]:
 
 def verify_wheelhouse(wheelhouse: Path, manifest: dict) -> list[str]:
     errors: list[str] = []
+    expected_names = {package["filename"] for package in manifest["packages"]}
+    for path in sorted(wheelhouse.glob("*.whl")):
+        if path.name not in expected_names:
+            errors.append(f"unexpected wheel: {path.name}")
     for package in manifest["packages"]:
         path = wheelhouse / package["filename"]
         if not path.is_file():
@@ -81,12 +85,15 @@ def prepare_wheelhouse(wheelhouse: Path, manifest: dict) -> None:
 
 
 def smoke_install(wheelhouse: Path, manifest: dict, python: str) -> dict:
+    wheel_errors = verify_wheelhouse(wheelhouse, manifest)
+    if wheel_errors:
+        raise RuntimeError("; ".join(wheel_errors))
     with tempfile.TemporaryDirectory(prefix="turner-wheel-smoke-") as directory:
         environment = Path(directory)
         subprocess.run([python, "-m", "venv", str(environment)], check=True)
         executable = environment / "bin" / "python"
-        requirements = [
-            f"{package['name']}=={package['version']}"
+        exact_wheels = [
+            str(wheelhouse / package["filename"])
             for package in manifest["packages"]
         ]
         subprocess.run(
@@ -96,9 +103,7 @@ def smoke_install(wheelhouse: Path, manifest: dict, python: str) -> dict:
                 "pip",
                 "install",
                 "--no-index",
-                "--find-links",
-                str(wheelhouse),
-                *requirements,
+                *exact_wheels,
             ],
             check=True,
         )

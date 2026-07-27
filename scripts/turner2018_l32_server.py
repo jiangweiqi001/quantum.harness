@@ -96,6 +96,10 @@ class StaleStageError(RuntimeError):
     """A structurally valid stage no longer matches its dependencies."""
 
 
+class StalePlanError(StaleStageError):
+    """The checkout/runtime no longer matches the stored execution plan."""
+
+
 def dense_resource_estimate(dimension: int) -> dict[str, int | float]:
     """Return decimal-GB storage estimates for real dense arrays."""
     bytes_per_array = int(dimension) ** 2 * 8
@@ -120,13 +124,17 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
     os.replace(partial, path)
 
 
-def require_stage(output_dir: str | Path, stage: str) -> dict[str, Any]:
+def require_stage(
+    output_dir: str | Path,
+    stage: str,
+    validation_cache: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Load a hash-validated completed stage or fail closed."""
     path = Path(output_dir) / "stages" / f"{stage}.json"
     if not path.is_file():
         raise RuntimeError(f"required stage {stage!r} is not complete: missing {path}")
     try:
-        return _validate_current_stage(Path(output_dir), stage)
+        return _validate_current_stage(Path(output_dir), stage, validation_cache)
     except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as error:
         raise RuntimeError(
             f"required stage {stage!r} is not complete or valid: {error}"
@@ -157,10 +165,16 @@ def _stage_inputs(output_dir: Path, stage: str) -> dict[str, str]:
     }
 
 
-def _validate_current_stage(output_dir: Path, stage: str) -> dict[str, Any]:
+def _validate_current_stage(
+    output_dir: Path,
+    stage: str,
+    validation_cache: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if validation_cache is not None and stage in validation_cache:
+        return validation_cache[stage]
     payload = validate_stage(output_dir, stage)
     for dependency in STAGE_DEPENDENCIES[stage]:
-        _validate_current_stage(output_dir, dependency)
+        _validate_current_stage(output_dir, dependency, validation_cache)
     expected_inputs = _stage_inputs(output_dir, stage)
     if payload.get("inputs") != expected_inputs:
         raise StaleStageError(
@@ -170,6 +184,8 @@ def _validate_current_stage(output_dir: Path, stage: str) -> dict[str, Any]:
     expected_plan = _plan_config_sha256(output_dir)
     if payload.get("plan_sha256") != expected_plan:
         raise StaleStageError(f"stage={stage} scientific plan hash is stale")
+    if validation_cache is not None:
+        validation_cache[stage] = payload
     return payload
 
 
@@ -317,6 +333,7 @@ def _source_hashes() -> dict[str, str]:
     names = (
         "pxp_ed.py",
         "turner2018_fig3.py",
+        "turner2018_ed_artifacts.py",
         "turner2018_ed_engine.py",
         "turner2018_ed_solver.py",
         "turner2018_ed_observables.py",
@@ -324,6 +341,32 @@ def _source_hashes() -> dict[str, str]:
         "turner2018_l32_server.py",
     )
     return {name: _sha256(root / name) for name in names}
+
+
+def build_execution_fingerprint() -> dict[str, Any]:
+    """Fingerprint only production code, lock bytes, and numerical runtime."""
+    repository_root = Path(__file__).resolve().parents[1]
+    versions = _package_versions()
+    return {
+        "sources": _source_hashes(),
+        "uv_lock_sha256": _sha256(repository_root / "uv.lock"),
+        "python": [sys.version_info.major, sys.version_info.minor],
+        "packages": {
+            name: versions[name]
+            for name in ("numpy", "scipy", "h5py")
+        },
+    }
+
+
+def _fingerprint_sha256(fingerprint: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            fingerprint,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _local_validation_provenance(invocation: list[str]) -> dict[str, Any]:
@@ -346,7 +389,12 @@ def _local_validation_provenance(invocation: list[str]) -> dict[str, Any]:
 
 def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]:
     """Build the immutable scientific/resource plan."""
-    dimension = L32_SECTOR_DIMENSION if length == 32 else None
+    production_dimensions = {
+        production_length: sector_dimension
+        for production_length, (_, sector_dimension) in PRODUCTION_DIMENSIONS.items()
+        if production_length in {28, 30, 32}
+    }
+    dimension = production_dimensions.get(length)
     packages = _package_versions()
     resources = dense_resource_estimate(dimension or 0)
     if dimension is not None:
@@ -376,7 +424,9 @@ def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]
             "enumeration": "direct constrained states; never scan 2**L",
             "symmetry_reduction": "direct k=0 inversion-even dihedral orbits",
             "full_constrained_dimension": (
-                L32_FULL_DIMENSION if length == 32 else None
+                PRODUCTION_DIMENSIONS[length][0]
+                if length in production_dimensions
+                else None
             ),
             "sector_dimension": dimension,
         },
@@ -411,9 +461,19 @@ def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]
             "git_revision": _git_revision(),
         },
     }
+    fingerprint = build_execution_fingerprint()
+    plan["execution_fingerprint"] = fingerprint
+    plan["execution_fingerprint_sha256"] = _fingerprint_sha256(fingerprint)
     scientific_config = {
         key: plan[key]
-        for key in ("model", "basis", "fsa", "solver", "observables")
+        for key in (
+            "model",
+            "basis",
+            "fsa",
+            "solver",
+            "observables",
+            "execution_fingerprint_sha256",
+        )
     }
     plan["scientific_config_sha256"] = hashlib.sha256(
         json.dumps(
@@ -473,14 +533,25 @@ def write_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]
     return plan
 
 
-def _load_plan(output_dir: Path, length: int) -> dict[str, Any]:
-    require_stage(output_dir, "plan")
+def _load_plan(
+    output_dir: Path,
+    length: int,
+    validation_cache: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    require_stage(output_dir, "plan", validation_cache)
     plan = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     planned_length = plan.get("model", {}).get("length")
     if planned_length != length:
         raise RuntimeError(
             f"output directory was planned for L={planned_length}, not L={length}"
         )
+    current_fingerprint = build_execution_fingerprint()
+    if (
+        plan.get("execution_fingerprint") != current_fingerprint
+        or plan.get("execution_fingerprint_sha256")
+        != _fingerprint_sha256(current_fingerprint)
+    ):
+        raise StalePlanError("stored plan execution fingerprint is stale")
     return plan
 
 
@@ -512,8 +583,12 @@ def _load_basis(path: Path) -> OrbitBasis:
         )
 
 
-def run_hamiltonian(length: int, output_dir: Path) -> None:
-    require_stage(output_dir, "basis")
+def run_hamiltonian(
+    length: int,
+    output_dir: Path,
+    validation_cache: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    require_stage(output_dir, "basis", validation_cache)
     basis = _load_basis(output_dir / "basis.npz")
     if basis.length != length:
         raise RuntimeError("basis artifact length does not match requested length")
@@ -530,10 +605,11 @@ def run_diagonalize(
     output_dir: Path,
     declared_memory_bytes: int,
     chunk_columns: int,
+    validation_cache: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     import scipy.sparse as sp
 
-    require_stage(output_dir, "hamiltonian")
+    require_stage(output_dir, "hamiltonian", validation_cache)
     matrix = sp.load_npz(output_dir / "hamiltonian.csr.npz").tocsr()
     estimate = estimate_dense_resources(matrix.shape[0], vectors=True)
     if declared_memory_bytes < estimate.minimum_requested_bytes:
@@ -558,13 +634,18 @@ def run_diagonalize(
     )
 
 
-def run_observables(length: int, output_dir: Path, chunk_columns: int) -> None:
+def run_observables(
+    length: int,
+    output_dir: Path,
+    chunk_columns: int,
+    validation_cache: dict[str, dict[str, Any]] | None = None,
+) -> None:
     import h5py
     import scipy.sparse as sp
 
-    require_stage(output_dir, "diagonalize")
-    require_stage(output_dir, "basis")
-    require_stage(output_dir, "hamiltonian")
+    require_stage(output_dir, "diagonalize", validation_cache)
+    require_stage(output_dir, "basis", validation_cache)
+    require_stage(output_dir, "hamiltonian", validation_cache)
     basis = _load_basis(output_dir / "basis.npz")
     matrix = sp.load_npz(output_dir / "hamiltonian.csr.npz").tocsr()
     with h5py.File(output_dir / "eigensystem.h5", "r") as handle:
@@ -590,14 +671,20 @@ def run_observables(length: int, output_dir: Path, chunk_columns: int) -> None:
     )
 
 
-def run_validate(length: int, output_dir: Path) -> None:
+def run_validate(
+    length: int,
+    output_dir: Path,
+    validation_cache: dict[str, dict[str, Any]] | None = None,
+) -> None:
     import h5py
     import numpy as np
     import scipy.sparse as sp
 
     validated = {}
     for stage in ("basis", "hamiltonian", "diagonalize", "observables"):
-        validated[stage] = require_stage(output_dir, stage)["artifact"]["sha256"]
+        validated[stage] = require_stage(
+            output_dir, stage, validation_cache
+        )["artifact"]["sha256"]
     checks: dict[str, dict[str, Any]] = {}
     try:
         basis = _load_basis(output_dir / "basis.npz")
@@ -1148,11 +1235,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.chunk_columns < 1:
         raise SystemExit("--chunk-columns must be positive")
 
+    validation_cache: dict[str, dict[str, Any]] = {}
     plan_manifest = args.output_dir / "stages" / "plan.json"
     try:
         if plan_manifest.is_file():
-            _load_plan(args.output_dir, args.length)
-            print("skipped stage=plan", flush=True)
+            try:
+                _load_plan(args.output_dir, args.length, validation_cache)
+            except StalePlanError:
+                if args.stage not in {"all", "plan"} and not args.rebuild:
+                    raise
+                write_plan(args.length, args.output_dir, invoked)
+                validation_cache.clear()
+                print("completed stage=plan", flush=True)
+            else:
+                print("skipped stage=plan", flush=True)
         else:
             write_plan(args.length, args.output_dir, invoked)
             print("completed stage=plan", flush=True)
@@ -1178,18 +1274,22 @@ def main(argv: list[str] | None = None) -> int:
             stage_manifest = args.output_dir / "stages" / f"{stage}.json"
             if stage_manifest.is_file() and not args.rebuild:
                 try:
-                    _validate_current_stage(args.output_dir, stage)
+                    _validate_current_stage(
+                        args.output_dir,
+                        stage,
+                        validation_cache,
+                    )
                 except StaleStageError:
                     pass
                 else:
                     print(f"skipped stage={stage}", flush=True)
                     continue
             for dependency in STAGE_DEPENDENCIES[stage]:
-                require_stage(args.output_dir, dependency)
+                require_stage(args.output_dir, dependency, validation_cache)
             if stage == "basis":
                 run_basis(args.length, args.output_dir)
             elif stage == "hamiltonian":
-                run_hamiltonian(args.length, args.output_dir)
+                run_hamiltonian(args.length, args.output_dir, validation_cache)
             elif stage == "diagonalize":
                 declared_memory = resolve_declared_memory_bytes(
                     os.environ,
@@ -1200,14 +1300,21 @@ def main(argv: list[str] | None = None) -> int:
                     args.output_dir,
                     declared_memory,
                     args.chunk_columns,
+                    validation_cache,
                 )
             elif stage == "observables":
-                run_observables(args.length, args.output_dir, args.chunk_columns)
+                run_observables(
+                    args.length,
+                    args.output_dir,
+                    args.chunk_columns,
+                    validation_cache,
+                )
             elif stage == "validate":
-                run_validate(args.length, args.output_dir)
+                run_validate(args.length, args.output_dir, validation_cache)
             elif stage == "figures":
                 run_figures(args.length, args.output_dir)
             print(f"completed stage={stage}", flush=True)
+            validation_cache.clear()
         except Exception as error:
             _record_failure(args.output_dir, stage, error)
             raise

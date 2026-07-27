@@ -153,7 +153,9 @@ The staged server driver uses the native independent engine and supports
 Every completed stage is skipped only after its artifact SHA-256 is verified;
 manifests also bind the exact predecessor-manifest hashes and scientific plan
 hash. A clean stale downstream stage is recomputed by `all`; corrupt artifacts
-and stale or corrupt inputs to direct stage invocations fail closed.
+always fail closed. A direct stage may recompute its own clean-stale output only
+when every input is current; stale execution plans or stale/corrupt inputs are
+rejected unless an explicit controlled rebuild is requested.
 `eigensystem.h5` and
 `observables.h5` remain separate, so observables never copy the dense
 eigenvector file. Task 6 `all` stops after `validate`; `figures` deliberately
