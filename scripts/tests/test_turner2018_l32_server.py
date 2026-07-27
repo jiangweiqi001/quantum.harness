@@ -343,6 +343,8 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             self.assertEqual(before, eigensystem.read_bytes())
 
     def test_figures_stage_publishes_only_after_fig3_and_fig4_accept(self):
+        import numpy as np
+
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             self.run_stage(output, "all")
@@ -352,7 +354,11 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             def render(path, payload, passed=True):
                 path.parent.mkdir(exist_ok=True)
                 path.write_bytes(payload)
-                path.with_suffix(".npz").write_bytes(b"npz-" + payload)
+                generation_id = path.stem
+                np.savez(
+                    path.with_suffix(".npz"),
+                    generation_id=np.asarray(generation_id),
+                )
                 path.with_suffix(".json").write_text(
                     json.dumps(
                         {
@@ -360,12 +366,16 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                             "acceptance": {
                                 "passed": passed,
                                 "generated_source": "independent-ed",
+                                "provenance_passed": True,
+                                "render_passed": True,
+                                "statistics_passed": True,
+                                "statistics_required": False,
                             },
-                            "generation_id": path.stem,
+                            "generation_id": generation_id,
                             "generation_assets": {
                                 "png_sha256": hashlib.sha256(payload).hexdigest(),
                                 "npz_sha256": hashlib.sha256(
-                                    b"npz-" + payload
+                                    path.with_suffix(".npz").read_bytes()
                                 ).hexdigest(),
                             },
                         }
@@ -390,7 +400,29 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             self.assertEqual(summary["fig4"]["sha256"], hashlib.sha256(b"fig4").hexdigest())
             self.assertTrue(summary["acceptance"]["passed"])
 
+            referenced = (
+                fig3_artifact,
+                fig3_artifact.with_suffix(".npz"),
+                fig3_artifact.with_suffix(".json"),
+                fig4_artifact,
+                fig4_artifact.with_suffix(".npz"),
+                fig4_artifact.with_suffix(".json"),
+            )
+            for target in referenced:
+                with self.subTest(target=target.name):
+                    original = target.read_bytes()
+                    target.write_bytes(original + b"corrupt")
+                    try:
+                        with self.assertRaisesRegex(
+                            RuntimeError, "figure.*hash|asset hash|JSON"
+                        ):
+                            self.run_stage(output, "figures")
+                    finally:
+                        target.write_bytes(original)
+
     def test_figures_stage_does_not_publish_when_fig4_rejects(self):
+        import numpy as np
+
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             self.run_stage(output, "all")
@@ -401,7 +433,11 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                 path.parent.mkdir(exist_ok=True)
                 payload = path.name.encode()
                 path.write_bytes(payload)
-                path.with_suffix(".npz").write_bytes(b"npz-" + payload)
+                generation_id = path.stem
+                np.savez(
+                    path.with_suffix(".npz"),
+                    generation_id=np.asarray(generation_id),
+                )
                 path.with_suffix(".json").write_text(
                     json.dumps(
                         {
@@ -410,10 +446,11 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                                 "passed": passed,
                                 "generated_source": "independent-ed",
                             },
+                            "generation_id": generation_id,
                             "generation_assets": {
                                 "png_sha256": hashlib.sha256(payload).hexdigest(),
                                 "npz_sha256": hashlib.sha256(
-                                    b"npz-" + payload
+                                    path.with_suffix(".npz").read_bytes()
                                 ).hexdigest(),
                             },
                         }
@@ -432,6 +469,72 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                     self.run_stage(output, "figures")
 
             self.assertFalse((output / "stages" / "figures.json").exists())
+
+    def test_figure_acceptance_rejects_mixed_json_npz_generation_identity(self):
+        import numpy as np
+        import turner2018_l32_server as server
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fig4.png"
+            npz = path.with_suffix(".npz")
+            path.write_bytes(b"png")
+            np.savez(npz, generation_id=np.asarray("npz-generation"))
+            path.with_suffix(".json").write_text(
+                json.dumps(
+                    {
+                        "source": "independent-ed",
+                        "generation_id": "json-generation",
+                        "acceptance": {
+                            "passed": True,
+                            "generated_source": "independent-ed",
+                            "provenance_passed": True,
+                            "render_passed": True,
+                            "statistics_passed": False,
+                            "statistics_required": False,
+                        },
+                        "generation_assets": {
+                            "png_sha256": hashlib.sha256(b"png").hexdigest(),
+                            "npz_sha256": hashlib.sha256(npz.read_bytes()).hexdigest(),
+                        },
+                    }
+                )
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "generation identity"):
+                server._accepted_figure(path, "Fig. 4", length=20)
+
+    def test_production_fig4_gate_requires_accepted_statistics(self):
+        import numpy as np
+        import turner2018_l32_server as server
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fig4.png"
+            npz = path.with_suffix(".npz")
+            path.write_bytes(b"png")
+            np.savez(npz, generation_id=np.asarray("same-generation"))
+            path.with_suffix(".json").write_text(
+                json.dumps(
+                    {
+                        "source": "independent-ed",
+                        "generation_id": "same-generation",
+                        "acceptance": {
+                            "passed": True,
+                            "generated_source": "independent-ed",
+                            "provenance_passed": True,
+                            "render_passed": True,
+                            "statistics_passed": False,
+                            "statistics_required": False,
+                        },
+                        "generation_assets": {
+                            "png_sha256": hashlib.sha256(b"png").hexdigest(),
+                            "npz_sha256": hashlib.sha256(npz.read_bytes()).hexdigest(),
+                        },
+                    }
+                )
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "statistics acceptance"):
+                server._accepted_figure(path, "Fig. 4", length=28)
 
     def test_observables_and_validate_never_full_slice_eigenvectors(self):
         import h5py

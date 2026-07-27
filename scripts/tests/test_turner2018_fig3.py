@@ -300,6 +300,19 @@ def test_missing_independent_size_is_recorded_without_official_substitution(tmp_
     assert metrics["available_independent_lengths"] == [10, 14]
 
 
+def test_independent_discovery_ignores_completed_figures_manifest(tmp_path):
+    independent_root = tmp_path / "independent"
+    output, independent = _independent_result(independent_root, length=10)
+    figures = output / "figures"
+    figures.mkdir()
+    (figures / "manifest.json").write_text('{"not": "an ED plan"}')
+
+    loaded = fig3.load_independent_results(independent_root)
+
+    assert set(loaded) == {10}
+    np.testing.assert_array_equal(loaded[10]["energies"], independent["energies"])
+
+
 def test_official_overlap_overlay_is_skipped_when_requested_member_is_absent(
     tmp_path, monkeypatch
 ):
@@ -470,6 +483,139 @@ def test_generation_backup_failure_preserves_previous_files(tmp_path, monkeypatc
     assert {target: target.read_bytes() for target in targets} == before
     assert not list(figure_dir.glob("*.partial*"))
     assert not list(figure_dir.glob("*.backup"))
+
+
+def test_shared_publication_preserves_backups_when_restore_link_fails(
+    tmp_path, monkeypatch
+):
+    targets = tuple(tmp_path / f"asset-{index}" for index in range(3))
+    partials = {
+        target: target.with_name(target.name + ".partial") for target in targets
+    }
+    for index, target in enumerate(targets):
+        target.write_bytes(f"old-{index}".encode())
+        partials[target].write_bytes(f"new-{index}".encode())
+    original_replace = fig3.os.replace
+    original_link = fig3.os.link
+
+    def fail_second_publish(source, destination):
+        if Path(source).suffix == ".partial" and Path(destination) == targets[1]:
+            raise OSError("injected publish failure")
+        return original_replace(source, destination)
+
+    def fail_first_restore(source, destination):
+        if str(source).endswith(".backup") and Path(destination) == targets[0]:
+            raise OSError("injected restore link failure")
+        return original_link(source, destination)
+
+    monkeypatch.setattr(fig3.os, "replace", fail_second_publish)
+    monkeypatch.setattr(fig3.os, "link", fail_first_restore)
+
+    with pytest.raises(RuntimeError, match="rollback incomplete"):
+        fig3._publish_generation(partials)
+
+    backup = targets[0].with_name(targets[0].name + ".backup")
+    assert backup.read_bytes() == b"old-0"
+
+
+def test_shared_publication_preserves_backups_when_rollback_unlink_fails(
+    tmp_path, monkeypatch
+):
+    targets = tuple(tmp_path / f"asset-{index}" for index in range(3))
+    partials = {
+        target: target.with_name(target.name + ".partial") for target in targets
+    }
+    for index, target in enumerate(targets):
+        target.write_bytes(f"old-{index}".encode())
+        partials[target].write_bytes(f"new-{index}".encode())
+    original_replace = fig3.os.replace
+    original_unlink = fig3._unlink_durable
+
+    def fail_second_publish(source, destination):
+        if Path(source).suffix == ".partial" and Path(destination) == targets[1]:
+            raise OSError("injected publish failure")
+        return original_replace(source, destination)
+
+    def fail_rollback_unlink(path):
+        if Path(path) == targets[0]:
+            raise OSError("injected rollback unlink failure")
+        return original_unlink(path)
+
+    monkeypatch.setattr(fig3.os, "replace", fail_second_publish)
+    monkeypatch.setattr(fig3, "_unlink_durable", fail_rollback_unlink)
+
+    with pytest.raises(RuntimeError, match="rollback incomplete"):
+        fig3._publish_generation(partials)
+
+    backups = [target.with_name(target.name + ".backup") for target in targets]
+    assert all(backup.is_file() for backup in backups)
+
+
+def test_shared_publication_preserves_backups_when_restore_fsync_fails(
+    tmp_path, monkeypatch
+):
+    targets = tuple(tmp_path / f"asset-{index}" for index in range(3))
+    partials = {
+        target: target.with_name(target.name + ".partial") for target in targets
+    }
+    for index, target in enumerate(targets):
+        target.write_bytes(f"old-{index}".encode())
+        partials[target].write_bytes(f"new-{index}".encode())
+    original_replace = fig3.os.replace
+    original_fsync_parent = fig3._fsync_parent
+    target_zero_fsyncs = 0
+
+    def fail_second_publish(source, destination):
+        if Path(source).suffix == ".partial" and Path(destination) == targets[1]:
+            raise OSError("injected publish failure")
+        return original_replace(source, destination)
+
+    def fail_restore_fsync(path):
+        nonlocal target_zero_fsyncs
+        if Path(path) == targets[0]:
+            target_zero_fsyncs += 1
+            if target_zero_fsyncs == 3:
+                raise OSError("injected restore fsync failure")
+        return original_fsync_parent(path)
+
+    monkeypatch.setattr(fig3.os, "replace", fail_second_publish)
+    monkeypatch.setattr(fig3, "_fsync_parent", fail_restore_fsync)
+
+    with pytest.raises(RuntimeError, match="rollback incomplete"):
+        fig3._publish_generation(partials)
+
+    assert targets[0].read_bytes() == b"old-0"
+    assert targets[0].with_name("asset-0.backup").read_bytes() == b"old-0"
+
+
+def test_shared_publication_fails_closed_and_preserves_backup_on_cleanup_failure(
+    tmp_path, monkeypatch
+):
+    targets = tuple(tmp_path / f"asset-{index}" for index in range(3))
+    partials = {
+        target: target.with_name(target.name + ".partial") for target in targets
+    }
+    for index, target in enumerate(targets):
+        target.write_bytes(f"old-{index}".encode())
+        partials[target].write_bytes(f"new-{index}".encode())
+    original_unlink = fig3._unlink_durable
+
+    def fail_existing_backup_cleanup(path):
+        path = Path(path)
+        if path.name == "asset-0.backup" and path.is_file():
+            raise OSError("injected backup cleanup failure")
+        return original_unlink(path)
+
+    monkeypatch.setattr(fig3, "_unlink_durable", fail_existing_backup_cleanup)
+
+    with pytest.raises(RuntimeError, match="published backup cleanup"):
+        fig3._publish_generation(partials)
+
+    assert all(
+        target.read_bytes() == f"new-{index}".encode()
+        for index, target in enumerate(targets)
+    )
+    assert targets[0].with_name("asset-0.backup").read_bytes() == b"old-0"
 
 
 @pytest.mark.parametrize("with_prior_generation", [False, True])

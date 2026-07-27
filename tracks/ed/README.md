@@ -165,7 +165,11 @@ rejected unless an explicit controlled rebuild is requested.
 `observables.h5` remain separate, so observables never copy the dense
 eigenvector file. Task 6 `all` stops after `validate`; `figures` runs both
 independent renderers and publishes its combined stage only after both
-transactional generations pass provenance and acceptance checks.
+transactional generations pass provenance and acceptance checks. Fig. 4
+publishes its overview and all size-specific PNG/JSON/NPZ files as one rollback
+unit. Production L=28/30/32 additionally requires accepted paper-window
+statistics; a local L20 render is explicitly provenance-only because its
+91-level exact paper slice is too short for the required 50-level edge trims.
 Inspect the resource estimate without computing:
 
 ```bash

@@ -36,6 +36,7 @@ from turner2018_fig3 import (
     EXPECTED_MODEL,
     INDEPENDENT_SOURCE,
     OFFICIAL_SOURCE,
+    _discover_task6_directories,
     _fsync_file,
     _fsync_parent,
     _hash_open_file,
@@ -304,12 +305,9 @@ def load_independent_fig4_results(
     root = Path(root)
     if not root.is_dir():
         raise RuntimeError(f"independent results root is not a directory: {root}")
-    manifests = sorted(root.rglob("manifest.json"))
-    if not manifests:
-        raise RuntimeError(f"no independent Task 6 manifests found below {root}")
     results: dict[int, dict[str, Any]] = {}
-    for manifest in manifests:
-        result = _load_independent_fig4_length(manifest.parent)
+    for directory in _discover_task6_directories(root):
+        result = _load_independent_fig4_length(directory)
         length = result["length"]
         if length in results:
             raise RuntimeError(f"duplicate independent result for L={length}")
@@ -464,7 +462,7 @@ def theoretical_spacing(spacing: np.ndarray, distribution: str) -> np.ndarray:
 def _load_available_official_histograms(
     official_data_dir: str | Path | None,
     lengths: list[int],
-) -> dict[int, np.ndarray]:
+) -> dict[int, dict[str, Any]]:
     if official_data_dir is None:
         return {}
     root = Path(official_data_dir)
@@ -478,10 +476,39 @@ def _load_available_official_histograms(
     if not available:
         return {}
     loaded = load_fig4_histograms(root)
-    return {
-        length: np.column_stack(loaded[length])
-        for length in available
-    }
+    archive_sha256 = _sha256(archive)
+    records: dict[int, dict[str, Any]] = {}
+    with ZipFile(archive) as handle:
+        for length in available:
+            member = FIG4_HISTOGRAM_MEMBERS[length]
+            member_bytes = handle.read(member)
+            records[length] = {
+                "xy": np.column_stack(loaded[length]),
+                "provenance": {
+                    "source": OFFICIAL_SOURCE,
+                    "archive_path": str(archive.resolve()),
+                    "archive_sha256": archive_sha256,
+                    "archive_byte_size": archive.stat().st_size,
+                    "member": member,
+                    "member_sha256": hashlib.sha256(member_bytes).hexdigest(),
+                    "member_byte_size": len(member_bytes),
+                },
+            }
+    return records
+
+
+def _official_xy(record: Any) -> np.ndarray | None:
+    if record is None:
+        return None
+    if isinstance(record, dict):
+        return np.asarray(record["xy"])
+    return np.asarray(record)
+
+
+def _official_source_provenance(record: Any) -> dict[str, Any] | None:
+    if isinstance(record, dict):
+        return record["provenance"]
+    return None
 
 
 def _independent_statistics(
@@ -491,10 +518,13 @@ def _independent_statistics(
     lower = dimension // 5
     upper = dimension // 2 - 500
     window = energies[lower:upper]
+    resolved_lower, resolved_upper, _step = slice(lower, upper).indices(dimension)
     minimum_window = 2 * PAPER_EDGE_TRIM + 2
     convention = {
         "window_expression": "sorted_energies[D//5:D//2-500]",
         "window_bounds": [lower, upper],
+        "raw_window_bounds": [lower, upper],
+        "resolved_window_bounds": [resolved_lower, resolved_upper],
         "window_count": int(len(window)),
         "unfolding_degree": PAPER_UNFOLDING_DEGREE,
         "edge_trim_levels": PAPER_EDGE_TRIM,
@@ -576,22 +606,19 @@ def _write_npz_partial(partial: Path, arrays: dict[str, np.ndarray]) -> None:
         os.fsync(handle.fileno())
 
 
-def _publish_figure_generation(
+def _write_figure_generation_partials(
     path: Path,
     figure: Any,
     arrays: dict[str, np.ndarray],
     metrics: dict[str, Any],
+    generation_id: str,
+    partials: dict[Path, Path],
 ) -> None:
-    generation_id = str(uuid.uuid4())
     generation_arrays = {**arrays, "generation_id": np.asarray(generation_id)}
     generation_metrics = json.loads(json.dumps(metrics, allow_nan=False))
     generation_metrics["generation_id"] = generation_id
     npz_path = path.with_suffix(".npz")
     json_path = path.with_suffix(".json")
-    partials = {
-        target: target.with_name(target.name + ".partial")
-        for target in (path, npz_path, json_path)
-    }
     try:
         _write_png_partial(partials[path], figure)
         plt.close(figure)
@@ -602,14 +629,19 @@ def _publish_figure_generation(
             "npz_sha256": _sha256(partials[npz_path]),
         }
         _write_json_partial(partials[json_path], generation_metrics)
-        _publish_generation(partials)
-    except Exception:
-        for partial in partials.values():
-            _unlink_durable(partial)
-        raise
     finally:
         if figure is not None:
             plt.close(figure)
+
+
+def _cleanup_generation_partials(partials: dict[Path, Path]) -> None:
+    for partial in partials.values():
+        try:
+            _unlink_durable(partial)
+        except Exception as error:
+            raise RuntimeError(
+                "Fig. 4 partial cleanup incomplete; recoverable partials preserved"
+            ) from error
 
 
 def _plot_independent_length(
@@ -661,6 +693,68 @@ def _finish_independent_axis(axis: plt.Axes, title: str) -> None:
     axis.legend(fontsize=8)
 
 
+def _acceptance_for_lengths(
+    lengths: list[int],
+    statistics_by_length: dict[int, dict[str, np.ndarray | int] | None],
+) -> dict[str, Any]:
+    statistics_passed = all(
+        statistics_by_length[length] is not None for length in lengths
+    )
+    statistics_required = any(length in PAPER_LENGTHS for length in lengths)
+    return {
+        "passed": bool(not statistics_required or statistics_passed),
+        "provenance_passed": True,
+        "render_passed": True,
+        "statistics_passed": statistics_passed,
+        "statistics_required": statistics_required,
+        "mode": (
+            "statistics-required" if statistics_required else "provenance-only"
+        ),
+        "validated_lengths": lengths,
+        "generated_source": INDEPENDENT_SOURCE,
+    }
+
+
+def _scoped_metrics(
+    base_metrics: dict[str, Any],
+    scope: list[int],
+    statistics_by_length: dict[int, dict[str, np.ndarray | int] | None],
+    *,
+    layout_kind: str,
+) -> dict[str, Any]:
+    metrics = json.loads(json.dumps(base_metrics, allow_nan=False))
+    scope_set = set(scope)
+    metrics["available_independent_lengths"] = scope
+    contiguous = np.arange(scope[0], scope[-1] + 1, 2)
+    metrics["missing_lengths_within_independent_range"] = np.setdiff1d(
+        contiguous, np.asarray(scope)
+    ).tolist()
+    metrics["missing_length_range"] = (
+        {"start": scope[0], "stop": scope[-1], "step": 2}
+        if len(scope) > 1
+        else None
+    )
+    metrics["lengths"] = {
+        str(length): metrics["lengths"][str(length)] for length in scope
+    }
+    metrics["series"] = {
+        name: entry
+        for name, entry in metrics["series"].items()
+        if entry.get("length") in scope_set
+    }
+    if metrics["official_data"] is not None:
+        metrics["official_data"]["overlays"] = {
+            str(length): provenance
+            for length, provenance in metrics["official_data"]["overlays"].items()
+            if int(length) in scope_set
+        }
+    metrics["acceptance"] = _acceptance_for_lengths(
+        scope, statistics_by_length
+    )
+    metrics["layout"] = {"kind": layout_kind, "lengths": scope}
+    return metrics
+
+
 def render_independent_fig4(
     independent_results_root: str | Path,
     *,
@@ -683,8 +777,10 @@ def render_independent_fig4(
     for length, result in results.items():
         statistics, convention = _independent_statistics(result["energies"])
         statistics_by_length[length] = statistics
-        official_xy = official_by_length.get(length)
+        official_record = official_by_length.get(length)
+        official_xy = _official_xy(official_record)
         mismatch = _official_mismatch(statistics, official_xy)
+        statistics_available = statistics is not None
         entry: dict[str, Any] = {
             "source": INDEPENDENT_SOURCE,
             "source_directory": str(result["directory"]),
@@ -701,10 +797,23 @@ def render_independent_fig4(
             "histogram_counts": None,
             "histogram_density": None,
             "official_mismatch": mismatch,
-            "acceptance": {
+            "official_source_provenance": _official_source_provenance(
+                official_record
+            ),
+            "provenance_acceptance": {
                 "passed": True,
                 "basis": (
                     "recursive manifests current and scientific validation passed"
+                ),
+            },
+            "histogram_acceptance": {
+                "passed": statistics_available,
+                "statistics_available": statistics_available,
+                "required_for_task6_production": length in PAPER_LENGTHS,
+                "basis": (
+                    "exact paper window and unfolding accepted"
+                    if statistics_available
+                    else convention["unavailable_reason"]
                 ),
             },
         }
@@ -783,68 +892,128 @@ def render_independent_fig4(
         "series": series,
         "lengths": metrics_by_length,
         "official_data": (
-            {"source": OFFICIAL_SOURCE, "root": str(Path(official_data_dir))}
+            {
+                "source": OFFICIAL_SOURCE,
+                "root": str(Path(official_data_dir)),
+                "overlays": {
+                    str(length): provenance
+                    for length, record in official_by_length.items()
+                    if (
+                        provenance := _official_source_provenance(record)
+                    ) is not None
+                },
+            }
             if official_data_dir is not None
             else None
         ),
-        "acceptance": {
-            "passed": True,
-            "validated_lengths": lengths,
-            "generated_source": INDEPENDENT_SOURCE,
-        },
     }
 
     colors = plt.get_cmap("tab10")
-    paths: dict[str, Path] = {}
-    figure, axis = plt.subplots(figsize=(7.2, 5.0))
-    for index, length in enumerate(lengths):
-        _plot_independent_length(
-            axis,
-            length=length,
-            statistics=statistics_by_length[length],
-            official_xy=official_by_length.get(length),
-            color=colors(index % 10),
-        )
-    _finish_independent_axis(
-        axis, "Turner et al. (2018) Fig. 4 — independent ED sizes"
-    )
-    figure.tight_layout()
     all_path = output_dir / "fig4_independent_all.png"
-    _publish_figure_generation(
-        all_path,
-        figure,
-        arrays,
-        {**base_metrics, "layout": {"kind": "all-sizes", "lengths": lengths}},
+    paths = {
+        "figure_all": all_path,
+        **{
+            f"figure_L{length}": output_dir / f"fig4_independent_L{length}.png"
+            for length in lengths
+        },
+    }
+    targets = tuple(
+        target
+        for path in paths.values()
+        for target in (path, path.with_suffix(".npz"), path.with_suffix(".json"))
     )
-    paths["figure_all"] = all_path
-
-    for index, length in enumerate(lengths):
-        figure, axis = plt.subplots(figsize=(6.4, 4.5))
-        _plot_independent_length(
-            axis,
-            length=length,
-            statistics=statistics_by_length[length],
-            official_xy=official_by_length.get(length),
-            color=colors(index % 10),
+    existing = [target.is_file() for target in targets]
+    if any(existing) and not all(existing):
+        raise RuntimeError(
+            "refusing to replace an incomplete prior Fig. 4 output set"
         )
-        _finish_independent_axis(axis, f"Independent ED Fig. 4 comparison — L={length}")
+    partials = {
+        target: target.with_name(target.name + ".partial") for target in targets
+    }
+    generation_id = str(uuid.uuid4())
+    try:
+        figure, axis = plt.subplots(figsize=(7.2, 5.0))
+        for index, length in enumerate(lengths):
+            _plot_independent_length(
+                axis,
+                length=length,
+                statistics=statistics_by_length[length],
+                official_xy=_official_xy(official_by_length.get(length)),
+                color=colors(index % 10),
+            )
+        _finish_independent_axis(
+            axis, "Turner et al. (2018) Fig. 4 — independent ED sizes"
+        )
         figure.tight_layout()
-        path = output_dir / f"fig4_independent_L{length}.png"
-        length_arrays = {
-            name: value
-            for name, value in arrays.items()
-            if name.startswith(f"L{length}_")
-        }
-        _publish_figure_generation(
-            path,
+        _write_figure_generation_partials(
+            all_path,
             figure,
-            length_arrays,
-            {
-                **base_metrics,
-                "layout": {"kind": "single-size", "lengths": [length]},
-            },
+            arrays,
+            _scoped_metrics(
+                base_metrics,
+                lengths,
+                statistics_by_length,
+                layout_kind="all-sizes",
+            ),
+            generation_id,
+            partials,
         )
-        paths[f"figure_L{length}"] = path
+
+        for index, length in enumerate(lengths):
+            figure, axis = plt.subplots(figsize=(6.4, 4.5))
+            _plot_independent_length(
+                axis,
+                length=length,
+                statistics=statistics_by_length[length],
+                official_xy=_official_xy(official_by_length.get(length)),
+                color=colors(index % 10),
+            )
+            _finish_independent_axis(
+                axis, f"Independent ED Fig. 4 comparison — L={length}"
+            )
+            figure.tight_layout()
+            path = paths[f"figure_L{length}"]
+            length_arrays = {
+                name: value
+                for name, value in arrays.items()
+                if name.startswith(f"L{length}_")
+            }
+            _write_figure_generation_partials(
+                path,
+                figure,
+                length_arrays,
+                _scoped_metrics(
+                    base_metrics,
+                    [length],
+                    statistics_by_length,
+                    layout_kind="single-size",
+                ),
+                generation_id,
+                partials,
+            )
+    except Exception as write_error:
+        try:
+            _cleanup_generation_partials(partials)
+        except RuntimeError as cleanup_error:
+            raise RuntimeError(
+                "Fig. 4 generation failed and partial cleanup was incomplete"
+            ) from ExceptionGroup(
+                "Fig. 4 write and cleanup errors", [write_error, cleanup_error]
+            )
+        raise
+    try:
+        _publish_generation(partials)
+    except Exception as publish_error:
+        try:
+            _cleanup_generation_partials(partials)
+        except RuntimeError as cleanup_error:
+            raise RuntimeError(
+                "Fig. 4 publication failed and partial cleanup was incomplete"
+            ) from ExceptionGroup(
+                "Fig. 4 publication and cleanup errors",
+                [publish_error, cleanup_error],
+            )
+        raise
     return paths
 
 

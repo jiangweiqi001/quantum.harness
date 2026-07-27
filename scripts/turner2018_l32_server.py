@@ -199,6 +199,8 @@ def _validate_current_stage(
     expected_plan = _plan_config_sha256(output_dir)
     if payload.get("plan_sha256") != expected_plan:
         raise StaleStageError(f"stage={stage} scientific plan hash is stale")
+    if stage == "figures":
+        _validate_figures_stage_references(output_dir, payload)
     if validation_cache is not None:
         validation_cache[stage] = payload
     return payload
@@ -879,26 +881,61 @@ def run_validate(
     )
 
 
-def _accepted_figure(path: Path, label: str) -> dict[str, Any]:
+def _accepted_figure(path: Path, label: str, *, length: int) -> dict[str, Any]:
+    import numpy as np
+
     if not path.is_file():
         raise RuntimeError(f"{label} renderer did not produce its artifact: {path}")
     json_path = path.with_suffix(".json")
     npz_path = path.with_suffix(".npz")
     if not json_path.is_file() or not npz_path.is_file():
         raise RuntimeError(f"{label} renderer did not produce complete sidecars")
-    metrics = json.loads(json_path.read_text(encoding="utf-8"))
+    try:
+        metrics = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{label} JSON sidecar is invalid") from error
     if (
         metrics.get("source") != "independent-ed"
         or metrics.get("acceptance", {}).get("passed") is not True
         or metrics.get("acceptance", {}).get("generated_source") != "independent-ed"
     ):
         raise RuntimeError(f"{label} acceptance/provenance check failed")
+    generation_id = metrics.get("generation_id")
+    if not isinstance(generation_id, str):
+        raise RuntimeError(f"{label} generation identity is missing")
+    try:
+        with np.load(npz_path, allow_pickle=False) as arrays:
+            npz_generation_id = arrays["generation_id"].item()
+    except (OSError, ValueError, KeyError) as error:
+        raise RuntimeError(f"{label} NPZ generation identity is invalid") from error
+    if npz_generation_id != generation_id:
+        raise RuntimeError(f"{label} JSON/NPZ generation identity mismatch")
     assets = metrics.get("generation_assets", {})
     if (
         assets.get("png_sha256") != _sha256(path)
         or assets.get("npz_sha256") != _sha256(npz_path)
     ):
         raise RuntimeError(f"{label} generation asset hash check failed")
+    if label == "Fig. 4":
+        acceptance = metrics["acceptance"]
+        production_statistics_required = length in {28, 30, 32}
+        if production_statistics_required and (
+            acceptance.get("statistics_required") is not True
+            or acceptance.get("statistics_passed") is not True
+            or metrics.get("lengths", {})
+            .get(str(length), {})
+            .get("histogram_acceptance", {})
+            .get("passed")
+            is not True
+        ):
+            raise RuntimeError(
+                f"{label} statistics acceptance is required for production L={length}"
+            )
+        if not production_statistics_required and (
+            acceptance.get("provenance_passed") is not True
+            or acceptance.get("render_passed") is not True
+        ):
+            raise RuntimeError(f"{label} provenance/render acceptance is invalid")
     return {
         "path": str(path.relative_to(path.parents[1])),
         "sha256": _sha256(path),
@@ -906,16 +943,56 @@ def _accepted_figure(path: Path, label: str) -> dict[str, Any]:
         "metrics_sha256": _sha256(json_path),
         "arrays_path": str(npz_path.relative_to(npz_path.parents[1])),
         "arrays_sha256": _sha256(npz_path),
-        "generation_id": metrics.get("generation_id"),
+        "generation_id": generation_id,
     }
+
+
+def _resolve_figure_reference(output_dir: Path, relative_path: Any) -> Path:
+    if not isinstance(relative_path, str):
+        raise RuntimeError("figure reference path must be a string")
+    resolved = (output_dir / relative_path).resolve()
+    figures_root = (output_dir / "figures").resolve()
+    if figures_root not in resolved.parents:
+        raise RuntimeError(f"figure reference escapes figures directory: {relative_path}")
+    return resolved
+
+
+def _validate_figures_stage_references(
+    output_dir: Path,
+    stage_payload: dict[str, Any],
+) -> None:
+    manifest_path = _resolve_figure_reference(
+        output_dir, stage_payload["artifact"]["path"]
+    )
+    try:
+        summary = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("combined figures manifest JSON is invalid") from error
+    length = summary.get("length")
+    if (
+        not isinstance(length, int)
+        or summary.get("source") != "independent-ed"
+        or summary.get("status") != "passed"
+        or summary.get("passed") is not True
+        or summary.get("acceptance", {}).get("passed") is not True
+    ):
+        raise RuntimeError("combined figures manifest acceptance is invalid")
+    for key, label in (("fig3", "Fig. 3"), ("fig4", "Fig. 4")):
+        recorded = summary.get(key)
+        if not isinstance(recorded, dict):
+            raise RuntimeError(f"combined figures manifest is missing {key}")
+        path = _resolve_figure_reference(output_dir, recorded.get("path"))
+        actual = _accepted_figure(path, label, length=length)
+        if actual != recorded:
+            raise RuntimeError(f"{label} figure reference hash/provenance mismatch")
 
 
 def run_figures(length: int, output_dir: Path) -> None:
     require_stage(output_dir, "validate")
     fig3_artifact = Path(FIG3_RENDERER_ADAPTER(output_dir, length))
-    fig3 = _accepted_figure(fig3_artifact, "Fig. 3")
+    fig3 = _accepted_figure(fig3_artifact, "Fig. 3", length=length)
     fig4_artifact = Path(FIG4_RENDERER_ADAPTER(output_dir, length))
-    fig4 = _accepted_figure(fig4_artifact, "Fig. 4")
+    fig4 = _accepted_figure(fig4_artifact, "Fig. 4", length=length)
     summary = {
         "schema_version": SCHEMA_VERSION,
         "status": "passed",

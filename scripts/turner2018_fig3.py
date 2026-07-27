@@ -117,40 +117,88 @@ def _write_npz_partial(partial: Path, arrays: dict[str, np.ndarray]) -> None:
 
 
 def _publish_generation(partials: dict[Path, Path]) -> None:
-    """Publish one three-file generation or durably restore its predecessor."""
+    """Publish one file set or durably restore/preserve its predecessor."""
     targets = tuple(partials)
     existing = [target.is_file() for target in targets]
     if any(existing) and not all(existing):
         raise RuntimeError("refusing to replace an incomplete prior Fig. 3 generation")
     backups = {target: target.with_name(target.name + ".backup") for target in targets}
-    for backup in backups.values():
-        _unlink_durable(backup)
+
+    def cleanup_until_failure(paths: Any, operation: str) -> None:
+        for path in paths:
+            try:
+                _unlink_durable(path)
+            except Exception as error:
+                raise RuntimeError(
+                    f"{operation} incomplete; recoverable files were preserved"
+                ) from error
+
+    cleanup_until_failure(backups.values(), "stale backup cleanup")
     if all(existing):
+        created_backups: list[Path] = []
         try:
             for target, backup in backups.items():
                 os.link(target, backup)
+                created_backups.append(backup)
                 _fsync_parent(backup)
-        except Exception:
-            for backup in backups.values():
-                _unlink_durable(backup)
+        except Exception as error:
+            try:
+                cleanup_until_failure(
+                    reversed(created_backups), "failed backup cleanup"
+                )
+            except RuntimeError as cleanup_error:
+                raise RuntimeError(
+                    "backup creation failed and cleanup was incomplete"
+                ) from ExceptionGroup(
+                    "backup creation errors", [error, cleanup_error]
+                )
             raise
     try:
         for target, partial in partials.items():
             os.replace(partial, target)
             _fsync_parent(target)
-    except Exception:
+    except Exception as publish_error:
+        rollback_errors: list[Exception] = []
         for target, had_previous in zip(targets, existing):
             backup = backups[target]
-            _unlink_durable(target)
-            if had_previous and backup.is_file():
-                os.link(backup, target)
-                _fsync_parent(target)
-        raise
-    finally:
+            try:
+                _unlink_durable(target)
+                if had_previous:
+                    if not backup.is_file():
+                        raise RuntimeError(
+                            f"required rollback backup is missing: {backup}"
+                        )
+                    os.link(backup, target)
+                    _fsync_parent(target)
+            except Exception as error:
+                rollback_errors.append(error)
         for partial in partials.values():
-            _unlink_durable(partial)
-        for backup in backups.values():
-            _unlink_durable(backup)
+            try:
+                _unlink_durable(partial)
+            except Exception as error:
+                rollback_errors.append(error)
+        if rollback_errors:
+            raise RuntimeError(
+                "generation rollback incomplete; recoverable backups preserved"
+            ) from ExceptionGroup(
+                "publication and rollback errors",
+                [publish_error, *rollback_errors],
+            )
+        cleanup_until_failure(backups.values(), "post-rollback backup cleanup")
+        raise publish_error
+
+    cleanup_until_failure(partials.values(), "published partial cleanup")
+    cleanup_until_failure(backups.values(), "published backup cleanup")
+
+
+def _discover_task6_directories(root: Path) -> list[Path]:
+    """Discover only Task 6 roots via their plan-stage manifests."""
+    directories = sorted(
+        {plan.parent.parent for plan in root.rglob("stages/plan.json")}
+    )
+    if not directories:
+        raise RuntimeError(f"no independent Task 6 manifests found below {root}")
+    return directories
 
 
 def _maximum_mismatch(left: np.ndarray, right: np.ndarray) -> float | None:
@@ -450,12 +498,9 @@ def load_independent_results(root: str | Path) -> dict[int, dict[str, Any]]:
     root = Path(root)
     if not root.is_dir():
         raise RuntimeError(f"independent results root is not a directory: {root}")
-    manifests = sorted(root.rglob("manifest.json"))
-    if not manifests:
-        raise RuntimeError(f"no independent Task 6 manifests found below {root}")
     results: dict[int, dict[str, Any]] = {}
-    for manifest in manifests:
-        result = _load_independent_length(manifest.parent)
+    for directory in _discover_task6_directories(root):
+        result = _load_independent_length(directory)
         length = result["length"]
         if length in results:
             raise RuntimeError(f"duplicate independent result for L={length}")

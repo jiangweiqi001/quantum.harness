@@ -25,7 +25,11 @@ from turner2018_fig4 import (
     theoretical_spacing,
     unfold_spectrum,
 )
-from turner2018_official import load_fig4_energies, load_fig4_histograms
+from turner2018_official import (
+    FIG4_HISTOGRAM_MEMBERS,
+    load_fig4_energies,
+    load_fig4_histograms,
+)
 from turner2018_l32_server import main as server_main
 
 
@@ -777,3 +781,214 @@ def test_independent_generation_backup_failure_preserves_previous_triplet(
     assert {path: path.read_bytes() for path in triplet} == before
     assert not list(output.glob("*.partial"))
     assert not list(output.glob("*.backup"))
+
+
+def test_discovery_ignores_figures_manifest_after_completed_render(tmp_path):
+    root = tmp_path / "independent"
+    _output, expected = _validated_independent_result(root)
+    figures = root / "L10" / "figures"
+    figures.mkdir()
+    (figures / "manifest.json").write_text('{"not": "an ED plan"}')
+
+    loaded = fig4.load_independent_fig4_results(root)
+
+    assert set(loaded) == {10}
+    np.testing.assert_array_equal(loaded[10]["energies"], expected)
+
+
+def test_size_specific_sidecars_have_exactly_one_length_and_series(
+    tmp_path, monkeypatch
+):
+    energies_28 = np.linspace(-4.0, 3.0, 4000) ** 3
+    energies_30 = np.linspace(-5.0, 2.0, 4200) ** 3
+    energies_28.sort()
+    energies_30.sort()
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {
+            28: _synthetic_independent(28, energies_28),
+            30: _synthetic_independent(30, energies_30),
+        },
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {},
+    )
+
+    paths = fig4.render_independent_fig4(
+        tmp_path / "independent",
+        output_dir=tmp_path / "figure",
+        official_data_dir=None,
+    )
+
+    metrics = json.loads(paths["figure_L28"].with_suffix(".json").read_text())
+    assert metrics["available_independent_lengths"] == [28]
+    assert set(metrics["lengths"]) == {"28"}
+    assert all(
+        name.startswith("L28_") or name.startswith("official_L28_")
+        for name in metrics["series"]
+    )
+    with np.load(paths["figure_L28"].with_suffix(".npz"), allow_pickle=False) as arrays:
+        assert all(
+            name == "generation_id"
+            or name.startswith("L28_")
+            or name.startswith("official_L28_")
+            for name in arrays.files
+        )
+
+
+def test_official_overlay_records_archive_and_member_hashes(tmp_path, monkeypatch):
+    archive = tmp_path / "level_statistics.zip"
+    member = FIG4_HISTOGRAM_MEMBERS[28]
+    member_bytes = b"synthetic official histogram member"
+    with ZipFile(archive, "w") as handle:
+        handle.writestr(member, member_bytes)
+    xy = np.column_stack(
+        (
+            np.r_[0.0, PAPER_HISTOGRAM_CENTERS],
+            np.r_[0.0, np.ones(24) / 4.8],
+        )
+    )
+    monkeypatch.setattr(
+        fig4,
+        "load_fig4_histograms",
+        lambda _root: {28: (xy[:, 0], xy[:, 1])},
+    )
+
+    loaded = fig4._load_available_official_histograms(tmp_path, [28])
+
+    provenance = loaded[28]["provenance"]
+    assert provenance["archive_path"] == str(archive.resolve())
+    assert provenance["archive_sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert provenance["member"] == member
+    assert provenance["member_sha256"] == hashlib.sha256(member_bytes).hexdigest()
+    np.testing.assert_array_equal(loaded[28]["xy"], xy)
+
+    energies = np.linspace(-4.0, 3.0, 4000) ** 3
+    energies.sort()
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {28: _synthetic_independent(28, energies)},
+    )
+    paths = fig4.render_independent_fig4(
+        tmp_path / "independent",
+        output_dir=tmp_path / "figure",
+        official_data_dir=tmp_path,
+    )
+    metrics = json.loads(paths["figure_L28"].with_suffix(".json").read_text())
+    assert metrics["lengths"]["28"]["official_source_provenance"] == provenance
+    assert metrics["official_data"]["overlays"]["28"] == provenance
+
+
+@pytest.mark.parametrize("with_prior_generation", [False, True])
+@pytest.mark.parametrize("failure_kind", ["write", "rename"])
+def test_later_size_failure_rolls_back_entire_fig4_output_set(
+    tmp_path, monkeypatch, with_prior_generation, failure_kind
+):
+    energies_28 = np.linspace(-4.0, 3.0, 4000) ** 3
+    energies_30 = np.linspace(-5.0, 2.0, 4200) ** 3
+    energies_28.sort()
+    energies_30.sort()
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {
+            28: _synthetic_independent(28, energies_28),
+            30: _synthetic_independent(30, energies_30),
+        },
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {},
+    )
+    output = tmp_path / "figure"
+    stems = ("fig4_independent_all", "fig4_independent_L28", "fig4_independent_L30")
+    targets = tuple(
+        output / f"{stem}.{suffix}"
+        for stem in stems
+        for suffix in ("png", "npz", "json")
+    )
+    if with_prior_generation:
+        fig4.render_independent_fig4(
+            tmp_path / "independent",
+            output_dir=output,
+            official_data_dir=None,
+        )
+        before = {path: path.read_bytes() for path in targets}
+    else:
+        before = {}
+
+    if failure_kind == "write":
+        original = fig4._write_json_partial
+
+        def fail_l30_json(partial, payload):
+            if partial.name == "fig4_independent_L30.json.partial":
+                partial.write_bytes(b"incomplete")
+                raise OSError("injected later-size write failure")
+            return original(partial, payload)
+
+        monkeypatch.setattr(fig4, "_write_json_partial", fail_l30_json)
+    else:
+        original_replace = fig4.os.replace
+
+        def fail_l30_publish(source, destination):
+            if Path(destination).name == "fig4_independent_L30.json":
+                raise OSError("injected later-size rename failure")
+            return original_replace(source, destination)
+
+        monkeypatch.setattr(fig4.os, "replace", fail_l30_publish)
+
+    with pytest.raises(OSError, match=f"later-size {failure_kind} failure"):
+        fig4.render_independent_fig4(
+            tmp_path / "independent",
+            output_dir=output,
+            official_data_dir=None,
+        )
+
+    if with_prior_generation:
+        assert {path: path.read_bytes() for path in targets} == before
+    else:
+        assert not any(path.exists() for path in targets)
+    assert not list(output.glob("*.partial"))
+    assert not list(output.glob("*.backup"))
+
+
+def test_l20_acceptance_is_explicitly_provenance_only(tmp_path, monkeypatch):
+    energies = np.linspace(-2.0, 2.0, 455)
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {20: _synthetic_independent(20, energies)},
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {},
+    )
+
+    paths = fig4.render_independent_fig4(
+        tmp_path / "independent",
+        output_dir=tmp_path / "figure",
+        official_data_dir=None,
+    )
+
+    metrics = json.loads(paths["figure_L20"].with_suffix(".json").read_text())
+    assert metrics["acceptance"] == {
+        "passed": True,
+        "provenance_passed": True,
+        "render_passed": True,
+        "statistics_passed": False,
+        "statistics_required": False,
+        "mode": "provenance-only",
+        "validated_lengths": [20],
+        "generated_source": "independent-ed",
+    }
+    length = metrics["lengths"]["20"]
+    assert length["raw_window_bounds"] == [91, -273]
+    assert length["resolved_window_bounds"] == [91, 182]
+    assert length["histogram_acceptance"]["passed"] is False
+    assert length["provenance_acceptance"]["passed"] is True
