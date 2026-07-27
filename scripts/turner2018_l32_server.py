@@ -89,6 +89,15 @@ COMPUTATIONAL_STAGES = (
     "observables",
     "validate",
 )
+
+
+def _render_fig3_adapter(output_dir: Path, length: int) -> Path:
+    from turner2018_fig3 import render_fig3_stage
+
+    return render_fig3_stage(output_dir, length)
+
+
+FIG3_RENDERER_ADAPTER: Callable[[Path, int], Path] = _render_fig3_adapter
 FIGURES_ADAPTER: Callable[[Path, int], Path] | None = None
 
 
@@ -865,10 +874,15 @@ def run_validate(
 
 def run_figures(length: int, output_dir: Path) -> None:
     require_stage(output_dir, "validate")
+    fig3_artifact = Path(FIG3_RENDERER_ADAPTER(output_dir, length))
+    if not fig3_artifact.is_file():
+        raise RuntimeError(
+            f"Fig. 3 renderer did not produce its artifact: {fig3_artifact}"
+        )
     if FIGURES_ADAPTER is None:
         raise RuntimeError(
-            "figure renderer adapter is unavailable until Tasks 7/8; "
-            "figures stage remains incomplete"
+            "combined figure renderer remains unavailable until Task 8 supplies "
+            "Fig. 4; figures stage remains incomplete"
         )
     artifact = Path(FIGURES_ADAPTER(output_dir, length))
     if not artifact.is_file():

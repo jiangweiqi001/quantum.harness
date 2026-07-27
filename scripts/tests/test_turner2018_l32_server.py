@@ -342,12 +342,24 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             self.assertNotEqual(eigensystem, observables)
             self.assertEqual(before, eigensystem.read_bytes())
 
-    def test_figures_stage_fails_closed_without_marking_complete(self):
+    def test_figures_stage_runs_fig3_hook_but_waits_for_task8_before_completion(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             self.run_stage(output, "all")
-            with self.assertRaisesRegex(RuntimeError, "figure renderer adapter is unavailable"):
-                self.run_stage(output, "figures")
+            fig3_artifact = output / "figures" / "fig3.png"
+
+            def render_fig3(_output, _length):
+                fig3_artifact.parent.mkdir()
+                fig3_artifact.touch()
+                return fig3_artifact
+
+            with mock.patch(
+                "turner2018_l32_server.FIG3_RENDERER_ADAPTER",
+                side_effect=render_fig3,
+            ) as renderer:
+                with self.assertRaisesRegex(RuntimeError, "Task 8"):
+                    self.run_stage(output, "figures")
+            renderer.assert_called_once_with(output, 10)
             self.assertFalse((output / "stages" / "figures.json").exists())
 
     def test_observables_and_validate_never_full_slice_eigenvectors(self):
