@@ -51,11 +51,41 @@ if [[ "$SLURM_GPUS_ON_NODE" != "$expected_gpus" ]]; then
   exit 2
 fi
 
-TURNER_SHARED_ROOT="${TURNER_SHARED_ROOT:-/work/share/giggleliu/jiangweiqi}"
+readonly TURNER_SHARED_ROOT="/work/share/giggleliu/jiangweiqi"
 TURNER_REPO="${TURNER_REPO:-$TURNER_SHARED_ROOT/quantum.harness}"
 TURNER_RUNTIME="${TURNER_RUNTIME:-$TURNER_SHARED_ROOT/python/cpython-3.12}"
 TURNER_OUTPUT_DIR="${TURNER_OUTPUT_DIR:-$TURNER_SHARED_ROOT/results/turner-l${TURNER_LENGTH}}"
 TURNER_PYTHON="${TURNER_PYTHON:-$TURNER_REPO/.venv/bin/python}"
+SLURM_SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$TURNER_REPO}"
+
+approved_root="$(realpath -m -- "$TURNER_SHARED_ROOT")"
+
+require_approved_path() {
+  local variable="$1"
+  local value="${!variable}"
+  local canonical
+  canonical="$(realpath -m -- "$value")"
+  case "$canonical" in
+    "$approved_root"/*) printf -v "$variable" "%s" "$canonical" ;;
+    *)
+      echo "$variable must resolve below $TURNER_SHARED_ROOT: $value" >&2
+      exit 2
+      ;;
+  esac
+}
+
+for variable in \
+  TURNER_REPO TURNER_RUNTIME TURNER_OUTPUT_DIR TURNER_PYTHON SLURM_SUBMIT_DIR
+do
+  require_approved_path "$variable"
+done
+if [[ -n "${TURNER_OFFLINE_IMAGE:-}" ]]; then
+  require_approved_path TURNER_OFFLINE_IMAGE
+fi
+if [[ "$SLURM_SUBMIT_DIR" != "$TURNER_REPO" ]]; then
+  echo "SLURM_SUBMIT_DIR must identify the reviewed TURNER_REPO checkout" >&2
+  exit 2
+fi
 
 [[ -d "$TURNER_REPO" ]] || {
   echo "missing shared checkout: $TURNER_REPO" >&2
@@ -79,8 +109,9 @@ actual_runtime="$(
   echo "offline virtual environment uses $actual_runtime, expected $expected_runtime" >&2
   exit 2
 }
-"$TURNER_PYTHON" -c \
-  'import sys; assert sys.version_info[:2] == (3, 12); import h5py, numpy, scipy'
+"$TURNER_PYTHON" "$TURNER_REPO/scripts/turner2018_wheelhouse.py" \
+  --manifest "$TURNER_REPO/scripts/turner2018_wheelhouse_manifest.json" \
+  --check-runtime
 
 export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 export OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"

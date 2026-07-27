@@ -190,15 +190,13 @@ appropriate request only; do not remove `--test-only`:
 
 ```bash
 # L=22, 24, 26, or 28: 8 CPUs, 1 GPU, 60000M
-export TURNER_LENGTH=28
-scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l22_28.sbatch
+TURNER_LENGTH=28 scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l22_28.sbatch
 
 # L=30: 16 CPUs, 2 GPUs, 120000M
-scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l30.sbatch
+TURNER_LENGTH=30 scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l30.sbatch
 
 # L=32: 32 CPUs, 4 GPUs, 240000M
-export TURNER_LENGTH=32
-scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l32.sbatch
+TURNER_LENGTH=32 scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l32.sbatch
 ```
 
 All wrappers request one task for 24 hours and use the exact

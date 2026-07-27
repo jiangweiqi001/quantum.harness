@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 from pathlib import Path
 import subprocess
@@ -62,6 +63,29 @@ def verify_wheelhouse(wheelhouse: Path, manifest: dict) -> list[str]:
             errors.append(f"missing wheel: {package['filename']}")
         elif _sha256(path) != package["sha256"]:
             errors.append(f"wheel sha256 mismatch: {package['filename']}")
+    return errors
+
+
+def check_runtime(
+    manifest: dict,
+    *,
+    python_version: tuple[int, int],
+    package_versions: dict[str, str],
+) -> list[str]:
+    errors: list[str] = []
+    expected_python = manifest["python"]
+    actual_python = ".".join(str(value) for value in python_version)
+    if actual_python != expected_python:
+        errors.append(
+            f"Python version mismatch: expected {expected_python}, found {actual_python}"
+        )
+    expected_versions = manifest["smoke_import"]["expected_versions"]
+    for name, expected in expected_versions.items():
+        actual = package_versions.get(name, "missing")
+        if actual != expected:
+            errors.append(
+                f"package version mismatch: {name} expected {expected}, found {actual}"
+            )
     return errors
 
 
@@ -142,10 +166,37 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--check-runtime", action="store_true")
     parser.add_argument("--python", default=sys.executable)
     args = parser.parse_args(argv)
 
     manifest = load_manifest(args.manifest)
+    if args.check_runtime:
+        versions = {}
+        for name in manifest["smoke_import"]["expected_versions"]:
+            try:
+                versions[name] = importlib.metadata.version(name)
+            except importlib.metadata.PackageNotFoundError:
+                versions[name] = "missing"
+        errors = check_runtime(
+            manifest,
+            python_version=sys.version_info[:2],
+            package_versions=versions,
+        )
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        print(
+            json.dumps(
+                {
+                    "python": manifest["python"],
+                    "versions": versions,
+                    "verified": True,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
     lock_errors = verify_lock(root / "uv.lock", manifest)
     if lock_errors:
         raise RuntimeError("; ".join(lock_errors))

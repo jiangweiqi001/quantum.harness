@@ -22,5 +22,5 @@ esac
 export TURNER_LENGTH
 export TURNER_ALLOWED_LENGTHS="22|24|26|28"
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/turner2018_dzeshell_run.sh"
+: "${SLURM_SUBMIT_DIR:?SLURM_SUBMIT_DIR is required}"
+source "$SLURM_SUBMIT_DIR/scripts/turner2018_dzeshell_run.sh"

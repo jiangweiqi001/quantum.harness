@@ -6,9 +6,11 @@ import importlib.util
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1145,16 +1147,45 @@ class TurnerL32SlurmTests(unittest.TestCase):
                 self.assertIn(
                     f'TURNER_ALLOWED_LENGTHS="{expected["lengths"]}"', text
                 )
-                self.assertIn('source "$SCRIPT_DIR/turner2018_dzeshell_run.sh"', text)
-                self.assertNotIn("turner2018_l32_server.py", text)
-                self.assertNotRegex(
-                    text, r"(?i)(password|api[_-]?key|access[_-]?token)\s*="
+                self.assertIn(
+                    'source "$SLURM_SUBMIT_DIR/scripts/turner2018_dzeshell_run.sh"',
+                    text,
                 )
+                self.assertNotIn("BASH_SOURCE", text)
+                self.assertNotIn("turner2018_l32_server.py", text)
+
+    def test_copied_spool_wrapper_finds_runner_in_reviewed_submit_checkout(self):
+        wrapper = SCRIPTS / "turner2018_dzeshell_l30.sbatch"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            submit = root / "reviewed-checkout"
+            scripts = submit / "scripts"
+            scripts.mkdir(parents=True)
+            marker = root / "runner-called"
+            (scripts / "turner2018_dzeshell_run.sh").write_text(
+                'printf "%s" "$TURNER_LENGTH" > "$RUNNER_MARKER"\n'
+            )
+            spool = root / "slurm-spool-copy"
+            spool.write_bytes(wrapper.read_bytes())
+
+            result = subprocess.run(
+                ["bash", str(spool)],
+                env={
+                    **os.environ,
+                    "SLURM_SUBMIT_DIR": str(submit),
+                    "RUNNER_MARKER": str(marker),
+                },
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(marker.read_text(), "30")
 
     def test_dzeshell_common_runner_uses_shared_offline_paths(self):
         text = (SCRIPTS / "turner2018_dzeshell_run.sh").read_text()
         root = "/work/share/giggleliu/jiangweiqi"
-        self.assertIn(f'TURNER_SHARED_ROOT="${{TURNER_SHARED_ROOT:-{root}}}"', text)
+        self.assertIn(f'readonly TURNER_SHARED_ROOT="{root}"', text)
         self.assertIn(
             'TURNER_REPO="${TURNER_REPO:-$TURNER_SHARED_ROOT/quantum.harness}"',
             text,
@@ -1171,9 +1202,145 @@ class TurnerL32SlurmTests(unittest.TestCase):
             'TURNER_PYTHON="${TURNER_PYTHON:-$TURNER_REPO/.venv/bin/python}"',
             text,
         )
+        self.assertIn("realpath -m", text)
+        self.assertIn("turner2018_wheelhouse.py", text)
+        self.assertIn("--check-runtime", text)
         self.assertIn("--stage all", text.replace("\n", " "))
         self.assertNotIn("--declared-memory", text)
         self.assertIn('OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"', text)
+
+    def test_dzeshell_runner_rejects_exported_paths_outside_shared_root(self):
+        runner = SCRIPTS / "turner2018_dzeshell_run.sh"
+        base = {
+            **os.environ,
+            "TURNER_ALLOWED_LENGTHS": "30",
+            "TURNER_LENGTH": "30",
+            "SLURM_CPUS_PER_TASK": "16",
+            "SLURM_MEM_PER_NODE": "120000M",
+            "SLURM_GPUS_ON_NODE": "2",
+        }
+        rejected = {
+            "TURNER_REPO": "/tmp/checkout",
+            "TURNER_OUTPUT_DIR": str(Path.home() / "results"),
+            "TURNER_PYTHON": "/usr/bin/python3",
+            "TURNER_RUNTIME": "/opt/cpython-3.12",
+            "TURNER_OFFLINE_IMAGE": "/tmp/runtime.sif",
+        }
+        for key, value in rejected.items():
+            with self.subTest(key=key):
+                environment = {**base, key: value}
+                result = subprocess.run(
+                    ["bash", str(runner)],
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(key, result.stderr)
+                self.assertIn("/work/share/giggleliu/jiangweiqi", result.stderr)
+
+    def test_dzeshell_runner_rejects_traversal_out_of_shared_root(self):
+        runner = SCRIPTS / "turner2018_dzeshell_run.sh"
+        environment = {
+            **os.environ,
+            "TURNER_ALLOWED_LENGTHS": "32",
+            "TURNER_LENGTH": "32",
+            "SLURM_CPUS_PER_TASK": "32",
+            "SLURM_MEM_PER_NODE": "240000M",
+            "SLURM_GPUS_ON_NODE": "4",
+            "TURNER_REPO": (
+                "/work/share/giggleliu/jiangweiqi/quantum.harness/../../../../tmp"
+            ),
+        }
+        result = subprocess.run(
+            ["bash", str(runner)],
+            env=environment,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("TURNER_REPO", result.stderr)
+
+    def test_dzeshell_tracked_files_have_no_literal_connection_secrets(self):
+        profile_path = (
+            REPO / "skills" / "using-slurm" / "profiles" / "qdeshell.toml"
+        )
+        profile = tomllib.loads(profile_path.read_text())
+        self.assertEqual(profile["connection"]["ssh"], {"alias": "qdeshell"})
+        forbidden_profile_keys = {
+            "host",
+            "hostname",
+            "port",
+            "user",
+            "username",
+            "key",
+            "key_path",
+            "identity_file",
+            "password",
+            "token",
+            "secret",
+        }
+
+        def walk_profile(value):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    self.assertNotIn(key.lower(), forbidden_profile_keys)
+                    walk_profile(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk_profile(child)
+
+        walk_profile(profile)
+
+        tracked = [
+            profile_path,
+            SCRIPTS / "turner2018_dzeshell_run.sh",
+            *(SCRIPTS / name for name in self.DZESHELL_CLASSES),
+        ]
+        assignment = re.compile(
+            r"(?im)^\s*(?:export\s+|readonly\s+)?"
+            r"(?P<name>[A-Z][A-Z0-9_]*)=(?P<value>[^\n#]*)$"
+        )
+        secret_name_parts = {
+            "HOST",
+            "HOSTNAME",
+            "PORT",
+            "USER",
+            "USERNAME",
+            "KEY",
+            "KEY_PATH",
+            "PRIVATE_KEY",
+            "IDENTITY_FILE",
+            "PASSWORD",
+            "PASSWD",
+            "TOKEN",
+            "SECRET",
+        }
+        forbidden_literals = (
+            "-----BEGIN",
+            "qdeshell_rsa",
+            "~/.ssh",
+            r"C:\\",
+        )
+        for path in tracked:
+            with self.subTest(path=path.name):
+                text = path.read_text()
+                for match in assignment.finditer(text):
+                    name = match.group("name")
+                    value = match.group("value").strip().strip("\"'")
+                    segments = name.split("_")
+                    looks_secret = (
+                        name in secret_name_parts
+                        or any(part in secret_name_parts for part in segments)
+                        or any(name.endswith(f"_{part}") for part in secret_name_parts)
+                    )
+                    if looks_secret and value and not value.startswith("$"):
+                        self.fail(f"{path.name}: literal value assigned to {name}")
+                for literal in forbidden_literals:
+                    self.assertNotIn(literal, text)
+                self.assertIsNone(
+                    re.search(r"(?:ssh|https?)://[^/\s:@]+:[^@\s]+@", text)
+                )
 
     def test_dzeshell_common_runner_rejects_unsupported_lengths_and_bad_resources(self):
         runner = SCRIPTS / "turner2018_dzeshell_run.sh"
@@ -1254,9 +1421,14 @@ class TurnerL32SlurmTests(unittest.TestCase):
 
     def test_documented_submission_is_test_only(self):
         text = (REPO / "tracks" / "ed" / "README.md").read_text()
-        for script in self.DZESHELL_CLASSES:
+        documented_lengths = {
+            "turner2018_dzeshell_l22_28.sbatch": 28,
+            "turner2018_dzeshell_l30.sbatch": 30,
+            "turner2018_dzeshell_l32.sbatch": 32,
+        }
+        for script, length in documented_lengths.items():
             expected = (
-                "scripts/harness_slurm.sh --profile "
+                f"TURNER_LENGTH={length} scripts/harness_slurm.sh --profile "
                 "skills/using-slurm/profiles/qdeshell.toml submit --test-only "
                 f"--script scripts/{script}"
             )
@@ -1270,6 +1442,37 @@ class TurnerL32SlurmTests(unittest.TestCase):
         self.assertIn("SCNET_PARTITION", text)
         self.assertIn("SCNET_ACCOUNT", text)
         self.assertIn("SCNET_QOS", text)
+
+    def test_documented_dzeshell_commands_scope_each_length(self):
+        text = (REPO / "tracks" / "ed" / "README.md").read_text()
+        match = re.search(
+            r"```bash\n(# L=22, 24, 26, or 28:.*?"
+            r"turner2018_dzeshell_l32\.sbatch)\n```",
+            text,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            calls = root / "calls"
+            harness = scripts / "harness_slurm.sh"
+            harness.write_text(
+                '#!/usr/bin/env bash\nprintf "%s|%s\\n" '
+                '"${TURNER_LENGTH-unset}" "$*" >> "$CALLS"\n'
+            )
+            harness.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-eu", "-o", "pipefail", "-c", match.group(1)],
+                cwd=root,
+                env={**os.environ, "TURNER_LENGTH": "99", "CALLS": str(calls)},
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            observed = [line.split("|", 1)[0] for line in calls.read_text().splitlines()]
+            self.assertEqual(observed, ["28", "30", "32"])
 
 
 @unittest.skipUnless(

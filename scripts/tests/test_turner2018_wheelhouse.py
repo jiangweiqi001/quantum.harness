@@ -5,6 +5,7 @@ import tomllib
 
 import pytest
 
+import turner2018_wheelhouse as wheelhouse
 from turner2018_wheelhouse import (
     load_manifest,
     smoke_install,
@@ -96,3 +97,26 @@ def test_smoke_install_passes_exact_manifested_wheel_paths(tmp_path, monkeypatch
     expected = [str(tmp_path / package["filename"]) for package in manifest["packages"]]
     assert install[-len(expected) :] == expected
     assert not any("==" in argument for argument in install)
+
+
+def test_runtime_check_uses_manifest_python_and_exact_package_versions():
+    manifest = load_manifest(MANIFEST)
+    assert wheelhouse.check_runtime(
+        manifest,
+        python_version=(3, 12),
+        package_versions=manifest["smoke_import"]["expected_versions"],
+    ) == []
+
+    assert wheelhouse.check_runtime(
+        manifest,
+        python_version=(3, 11),
+        package_versions=manifest["smoke_import"]["expected_versions"],
+    ) == ["Python version mismatch: expected 3.12, found 3.11"]
+
+    wrong = dict(manifest["smoke_import"]["expected_versions"])
+    wrong["numpy"] = "0.0.0"
+    assert wheelhouse.check_runtime(
+        manifest,
+        python_version=(3, 12),
+        package_versions=wrong,
+    ) == ["package version mismatch: numpy expected 2.4.6, found 0.0.0"]
