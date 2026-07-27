@@ -94,8 +94,12 @@ def _read_open_file(handle: Any) -> bytes:
     return payload
 
 
-def _write_json_partial(path: Path, payload: dict[str, Any]) -> Path:
-    partial = path.with_name(path.name + ".partial")
+def _write_png_partial(partial: Path, figure: Any) -> None:
+    figure.savefig(partial, dpi=180, format="png")
+    _fsync_file(partial)
+
+
+def _write_json_partial(partial: Path, payload: dict[str, Any]) -> None:
     encoded = (
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
     ).encode("utf-8")
@@ -103,16 +107,13 @@ def _write_json_partial(path: Path, payload: dict[str, Any]) -> Path:
         handle.write(encoded)
         handle.flush()
         os.fsync(handle.fileno())
-    return partial
 
 
-def _write_npz_partial(path: Path, arrays: dict[str, np.ndarray]) -> Path:
-    partial = path.with_name(path.name + ".partial")
+def _write_npz_partial(partial: Path, arrays: dict[str, np.ndarray]) -> None:
     with partial.open("wb") as handle:
         np.savez(handle, **arrays)
         handle.flush()
         os.fsync(handle.fileno())
-    return partial
 
 
 def _publish_generation(partials: dict[Path, Path]) -> None:
@@ -714,10 +715,6 @@ def render_independent_fig3(
             fontweight="bold",
         )
     figure.tight_layout()
-    image_partial = path.with_name(path.stem + ".partial.png")
-    figure.savefig(image_partial, dpi=180, format="png")
-    plt.close(figure)
-    _fsync_file(image_partial)
 
     per_length: dict[str, Any] = {}
     for length in lengths:
@@ -881,21 +878,28 @@ def render_independent_fig3(
     arrays["generation_id"] = np.asarray(generation_id)
     npz_path = path.with_suffix(".npz")
     json_path = path.with_suffix(".json")
-    partials = {path: image_partial}
+    partials = {
+        target: target.with_name(target.name + ".partial")
+        for target in (path, npz_path, json_path)
+    }
     try:
-        npz_partial = _write_npz_partial(npz_path, arrays)
-        partials[npz_path] = npz_partial
+        _write_png_partial(partials[path], figure)
+        plt.close(figure)
+        figure = None
+        _write_npz_partial(partials[npz_path], arrays)
         metrics["generation_assets"] = {
-            "png_sha256": _sha256(image_partial),
-            "npz_sha256": _sha256(npz_partial),
+            "png_sha256": _sha256(partials[path]),
+            "npz_sha256": _sha256(partials[npz_path]),
         }
-        json_partial = _write_json_partial(json_path, metrics)
-        partials[json_path] = json_partial
+        _write_json_partial(partials[json_path], metrics)
         _publish_generation(partials)
     except Exception:
         for partial in partials.values():
             _unlink_durable(partial)
         raise
+    finally:
+        if figure is not None:
+            plt.close(figure)
     return path
 
 

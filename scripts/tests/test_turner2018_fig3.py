@@ -472,6 +472,126 @@ def test_generation_backup_failure_preserves_previous_files(tmp_path, monkeypatc
     assert not list(figure_dir.glob("*.backup"))
 
 
+@pytest.mark.parametrize("with_prior_generation", [False, True])
+@pytest.mark.parametrize("artifact", ["png", "npz", "json"])
+@pytest.mark.parametrize("failure_phase", ["creation", "write", "fsync"])
+def test_partial_failures_are_owned_and_cleaned(
+    tmp_path,
+    monkeypatch,
+    with_prior_generation,
+    artifact,
+    failure_phase,
+):
+    independent_root = tmp_path / "independent"
+    _independent_result(independent_root)
+    figure_dir = tmp_path / "figure"
+    png = figure_dir / "fig3_independent_L10.png"
+    targets = {
+        "png": png,
+        "npz": png.with_suffix(".npz"),
+        "json": png.with_suffix(".json"),
+    }
+    if with_prior_generation:
+        fig3.render_independent_fig3(
+            independent_root,
+            output_dir=figure_dir,
+            official_data_dir=None,
+        )
+        before = {target: target.read_bytes() for target in targets.values()}
+    else:
+        before = {}
+    target = targets[artifact]
+    partial = target.with_name(target.name + ".partial")
+
+    def injected_failure(actual_partial, _payload):
+        assert actual_partial == partial
+        if failure_phase != "creation":
+            with actual_partial.open("wb") as handle:
+                handle.write(b"incomplete")
+                handle.flush()
+            if failure_phase == "fsync":
+                raise OSError(f"injected {artifact} fsync failure")
+        raise OSError(f"injected {artifact} {failure_phase} failure")
+
+    monkeypatch.setattr(
+        fig3,
+        f"_write_{artifact}_partial",
+        injected_failure,
+        raising=False,
+    )
+    with pytest.raises(OSError, match=f"{artifact} {failure_phase} failure"):
+        fig3.render_independent_fig3(
+            independent_root,
+            output_dir=figure_dir,
+            official_data_dir=None,
+        )
+
+    if with_prior_generation:
+        assert {
+            output: output.read_bytes() for output in targets.values()
+        } == before
+    else:
+        assert not any(output.exists() for output in targets.values())
+    assert not list(figure_dir.glob("*.partial*"))
+    assert not list(figure_dir.glob("*.backup"))
+
+
+@pytest.mark.parametrize("with_prior_generation", [False, True])
+@pytest.mark.parametrize("artifact", ["png", "npz", "json"])
+def test_real_partial_fsync_failure_is_cleaned(
+    tmp_path, monkeypatch, with_prior_generation, artifact
+):
+    independent_root = tmp_path / "independent"
+    _independent_result(independent_root)
+    figure_dir = tmp_path / "figure"
+    png = figure_dir / "fig3_independent_L10.png"
+    targets = {
+        "png": png,
+        "npz": png.with_suffix(".npz"),
+        "json": png.with_suffix(".json"),
+    }
+    if with_prior_generation:
+        fig3.render_independent_fig3(
+            independent_root,
+            output_dir=figure_dir,
+            official_data_dir=None,
+        )
+        before = {target: target.read_bytes() for target in targets.values()}
+    else:
+        before = {}
+    failed_partial = targets[artifact].with_name(
+        targets[artifact].name + ".partial"
+    )
+    original_fsync = fig3.os.fsync
+
+    def fail_target_fsync(descriptor):
+        descriptor_path = Path(f"/proc/self/fd/{descriptor}")
+        try:
+            opened_path = Path(os.readlink(descriptor_path))
+        except OSError:
+            opened_path = None
+        if opened_path == failed_partial:
+            raise OSError(f"injected real {artifact} fsync failure")
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(fig3.os, "fsync", fail_target_fsync)
+    with pytest.raises(OSError, match=f"real {artifact} fsync failure"):
+        fig3.render_independent_fig3(
+            independent_root,
+            output_dir=figure_dir,
+            official_data_dir=None,
+        )
+
+    if with_prior_generation:
+        assert {
+            output: output.read_bytes() for output in targets.values()
+        } == before
+    else:
+        assert not any(output.exists() for output in targets.values())
+    assert not list(figure_dir.glob("*.partial*"))
+    assert not list(figure_dir.glob("*.backup"))
+
+
 def test_length_and_independent_results_root_are_mutually_exclusive():
     with pytest.raises(SystemExit):
         fig3.build_parser().parse_args(
