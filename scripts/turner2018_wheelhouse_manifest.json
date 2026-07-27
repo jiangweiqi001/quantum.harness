@@ -112,7 +112,7 @@
     }
   ],
   "smoke_import": {
-    "command": "import numpy, scipy, h5py, matplotlib",
+    "modules": ["numpy", "scipy", "h5py", "matplotlib"],
     "expected_versions": {
       "numpy": "2.4.6",
       "scipy": "1.18.0",

@@ -45,3 +45,39 @@ directly under the project CPython 3.12 environment.
 
 None in scope. The wheelhouse remains platform-specific and lock-bound by
 design; changing `uv.lock` requires regenerating the manifest.
+
+## Review remediation: declarative smoke imports
+
+RED evidence:
+
+- The focused suite produced 12 failures: the manifest had no declarative
+  `modules` list, source-bearing fields and malicious names were accepted, no
+  clean-CI isolated-smoke helper existed, and `--check-runtime` still used
+  `exec`.
+
+GREEN implementation:
+
+- Replaced `smoke_import.command` with
+  `modules: [numpy, scipy, h5py, matplotlib]`.
+- Manifest loading rejects `command` and `source`, empty or duplicate module
+  lists, non-ASCII identifier/dotted-name strings, and module/version-key
+  mismatches.
+- Both runtime paths import only through tool-controlled
+  `importlib.import_module` calls. The isolated subprocess receives validated
+  JSON as an argument to fixed tool source; manifest text is never evaluated.
+- Added a wheel-independent subprocess unit test that imports Matplotlib and
+  proves exact-version mismatch rejection. The prepare-smoke test now exercises
+  generated command construction without any downloaded wheelhouse.
+- Preserved all 13 exact wheels, exact-file-set rejection, and the Dzeshell
+  pre-compute runtime-check ordering.
+
+Review verification:
+
+- Focused wheelhouse and runner suites:
+  `73 passed, 66 subtests passed`.
+- Full script regressions:
+  `676 passed, 66 subtests passed`.
+- Optional real isolated wheelhouse smoke passed on CPython 3.12.13 x86_64,
+  importing NumPy, SciPy, h5py, and Matplotlib and matching all exact versions.
+- `py_compile`, IDE lints, source-field/`exec` scan, and `git diff --check`
+  passed.

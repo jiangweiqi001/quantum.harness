@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import importlib.metadata
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,10 +17,56 @@ import tomllib
 import urllib.request
 
 
+MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+ISOLATED_SMOKE_SOURCE = """\
+import importlib
+import importlib.metadata
+import json
+import platform
+import sys
+
+spec = json.loads(sys.argv[1])
+for module in spec["modules"]:
+    importlib.import_module(module)
+versions = {
+    name: importlib.metadata.version(name)
+    for name in spec["expected_versions"]
+}
+print(json.dumps({
+    "imported_modules": spec["modules"],
+    "machine": platform.machine(),
+    "python": platform.python_version(),
+    "versions": versions,
+}, sort_keys=True))
+"""
+
+
+def _validate_smoke_import(manifest: dict) -> dict:
+    smoke = manifest.get("smoke_import")
+    if not isinstance(smoke, dict):
+        raise RuntimeError("smoke_import must be an object")
+    forbidden = sorted({"command", "source"}.intersection(smoke))
+    if forbidden:
+        raise RuntimeError(f"forbidden smoke import field: {forbidden[0]}")
+    modules = smoke.get("modules")
+    if not isinstance(modules, list) or not modules:
+        raise RuntimeError("smoke import modules must be a non-empty list")
+    for module in modules:
+        if not isinstance(module, str) or MODULE_NAME.fullmatch(module) is None:
+            raise RuntimeError(f"invalid smoke import module: {module!r}")
+    if len(set(modules)) != len(modules):
+        raise RuntimeError("duplicate smoke import module")
+    expected = smoke.get("expected_versions")
+    if not isinstance(expected, dict) or set(modules) != set(expected):
+        raise RuntimeError("smoke import modules must match expected_versions")
+    return smoke
+
+
 def load_manifest(path: Path) -> dict:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if payload.get("schema_version") != "turner2018-wheelhouse-v1":
         raise RuntimeError("unsupported wheelhouse manifest schema")
+    _validate_smoke_import(payload)
     return payload
 
 
@@ -89,6 +137,38 @@ def check_runtime(
     return errors
 
 
+def import_modules(modules: list[str]) -> None:
+    for module in modules:
+        importlib.import_module(module)
+
+
+def run_isolated_smoke(python: str, manifest: dict) -> dict:
+    smoke = _validate_smoke_import(manifest)
+    payload = json.dumps(
+        {
+            "modules": smoke["modules"],
+            "expected_versions": smoke["expected_versions"],
+        },
+        sort_keys=True,
+    )
+    result = subprocess.run(
+        [str(python), "-c", ISOLATED_SMOKE_SOURCE, payload],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    proof = json.loads(result.stdout)
+    if proof["machine"] != "x86_64":
+        raise RuntimeError("wheel smoke test did not run on x86_64")
+    for name, expected in smoke["expected_versions"].items():
+        actual = proof["versions"].get(name, "missing")
+        if actual != expected:
+            raise RuntimeError(
+                f"package version mismatch: {name} expected {expected}, found {actual}"
+            )
+    return proof
+
+
 def prepare_wheelhouse(wheelhouse: Path, manifest: dict) -> None:
     wheelhouse.mkdir(parents=True, exist_ok=True)
     for package in manifest["packages"]:
@@ -131,26 +211,7 @@ def smoke_install(wheelhouse: Path, manifest: dict, python: str) -> dict:
             ],
             check=True,
         )
-        expected_names = tuple(manifest["smoke_import"]["expected_versions"])
-        command = (
-            f"{manifest['smoke_import']['command']};"
-            "import importlib.metadata,json,platform;"
-            "print(json.dumps({'python':platform.python_version(),"
-            "'machine':platform.machine(),'versions':"
-            f"{{name:importlib.metadata.version(name) for name in {expected_names!r}}}"
-            "},sort_keys=True))"
-        )
-        result = subprocess.run(
-            [str(executable), "-c", command],
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-    proof = json.loads(result.stdout)
-    if proof["machine"] != "x86_64":
-        raise RuntimeError("wheel smoke test did not run on x86_64")
-    if proof["versions"] != manifest["smoke_import"]["expected_versions"]:
-        raise RuntimeError("wheel smoke import versions mismatch")
+        proof = run_isolated_smoke(str(executable), manifest)
     return proof
 
 
@@ -175,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = load_manifest(args.manifest)
     if args.check_runtime:
-        exec(manifest["smoke_import"]["command"], {})
+        import_modules(manifest["smoke_import"]["modules"])
         versions = {}
         for name in manifest["smoke_import"]["expected_versions"]:
             try:
