@@ -94,7 +94,7 @@ def _sha256(path: Path) -> str:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def _git_revision() -> str | None:
+def _git_revision() -> str:
     repository_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
         ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
@@ -102,7 +102,14 @@ def _git_revision() -> str | None:
         capture_output=True,
         check=False,
     )
-    return result.stdout.strip() or None
+    revision = (result.stdout or "").strip()
+    if result.returncode != 0 or not revision:
+        detail = (result.stderr or "").strip()
+        message = "unable to resolve git revision"
+        if detail:
+            message += f": {detail}"
+        raise RuntimeError(message)
+    return revision
 
 
 def _package_versions() -> dict[str, str | None]:
@@ -750,8 +757,10 @@ def run_local_validation(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=STAGES)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    execution_mode = parser.add_mutually_exclusive_group()
+    execution_mode.add_argument("--stage", choices=STAGES)
+    execution_mode.add_argument("--validate-local", type=int, nargs="+")
     parser.add_argument("--length", type=int, default=32)
     parser.add_argument(
         "--output-dir",
@@ -761,7 +770,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--chunk-columns", type=int, default=32)
     parser.add_argument("--validate-small-l", type=int)
-    parser.add_argument("--validate-local", type=int, nargs="+")
     parser.add_argument("--official-data-dir", type=Path)
     return parser
 
@@ -775,13 +783,18 @@ def main(argv: list[str] | None = None) -> int:
                 "--validate-local requires exactly 10 12 14 16 18 20 in that order"
             )
         conflicting_options = {
-            "--stage",
             "--dry-run",
             "--length",
             "--chunk-columns",
             "--validate-small-l",
+            "--official-data-dir",
         }
-        if any(option in invoked for option in conflicting_options):
+        raw_options = {
+            token.split("=", 1)[0]
+            for token in invoked
+            if token.startswith("--")
+        }
+        if raw_options & conflicting_options:
             raise SystemExit(
                 "--validate-local is mutually exclusive with execution-mode options"
             )

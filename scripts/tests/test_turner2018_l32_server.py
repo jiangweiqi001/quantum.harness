@@ -278,7 +278,33 @@ class TurnerSmallLEquivalenceTests(unittest.TestCase):
                     "turner2018_l32_server.run_local_validation",
                     side_effect=AssertionError("scientific work must not start"),
                 ) as run:
-                    with self.assertRaisesRegex(SystemExit, "mutually exclusive"):
+                    with self.assertRaises(SystemExit) as raised:
+                        main(
+                            [
+                                "--validate-local",
+                                *(str(value) for value in self.validation_lengths),
+                                *conflict,
+                            ]
+                        )
+                    if conflict[0] != "--stage":
+                        self.assertIn("mutually exclusive", str(raised.exception))
+                run.assert_not_called()
+
+    def test_validate_local_rejects_equals_form_execution_options_before_work(self):
+        conflicts = [
+            ["--stage=plan"],
+            ["--length=32"],
+            ["--chunk-columns=32"],
+            ["--validate-small-l=10"],
+            ["--official-data-dir=/tmp/official"],
+        ]
+        for conflict in conflicts:
+            with self.subTest(conflict=conflict):
+                with mock.patch(
+                    "turner2018_l32_server.run_local_validation",
+                    side_effect=AssertionError("scientific work must not start"),
+                ) as run:
+                    with self.assertRaises(SystemExit):
                         main(
                             [
                                 "--validate-local",
@@ -287,6 +313,20 @@ class TurnerSmallLEquivalenceTests(unittest.TestCase):
                             ]
                         )
                 run.assert_not_called()
+
+    def test_argparse_abbreviations_are_rejected_before_work(self):
+        with mock.patch(
+            "turner2018_l32_server.run_local_validation",
+            side_effect=AssertionError("scientific work must not start"),
+        ) as run:
+            with self.assertRaises(SystemExit):
+                main(
+                    [
+                        "--validate-loc",
+                        *(str(value) for value in self.validation_lengths),
+                    ]
+                )
+        run.assert_not_called()
 
     def test_running_marker_replaces_stale_pass_before_scientific_work(self):
         import turner2018_l32_server as server
@@ -342,29 +382,61 @@ class TurnerSmallLEquivalenceTests(unittest.TestCase):
             self.assertFalse(persisted["passed"])
             self.assertIn("hash injection", persisted["error"])
 
-    def test_provenance_failure_publishes_minimal_failed_summary(self):
+    def test_real_git_failure_publishes_minimal_failed_summary(self):
         import turner2018_l32_server as server
 
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory)
-            with (
-                mock.patch.object(
-                    server,
-                    "validate_small_l",
-                    side_effect=lambda length, _: self._passing_result(length),
-                ),
-                mock.patch.object(
-                    server,
-                    "_git_revision",
-                    side_effect=OSError("provenance injection"),
-                ),
+        git_results = [
+            subprocess.CompletedProcess(
+                args=["git"],
+                returncode=128,
+                stdout="",
+                stderr="fatal: injected git failure",
+            ),
+            subprocess.CompletedProcess(
+                args=["git"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
+        for git_result in git_results:
+            with self.subTest(
+                returncode=git_result.returncode,
+                stdout=git_result.stdout,
             ):
-                _path, summary = server.run_local_validation(
-                    self.validation_lengths, output, None, ["--validate-local"]
-                )
+                with tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory)
+                    with (
+                        mock.patch.object(
+                            server.subprocess,
+                            "run",
+                            return_value=git_result,
+                        ),
+                        mock.patch.object(
+                            server,
+                            "validate_small_l",
+                            side_effect=AssertionError(
+                                "scientific work must not start"
+                            ),
+                        ) as validate,
+                    ):
+                        _path, summary = server.run_local_validation(
+                            self.validation_lengths,
+                            output,
+                            None,
+                            ["--validate-local"],
+                        )
 
-            self.assertEqual(summary["status"], "failed")
-            self.assertIn("provenance injection", summary["error"])
+                    persisted = json.loads(
+                        (
+                            output / "validation" / "local-equivalence.json"
+                        ).read_text()
+                    )
+                    self.assertEqual(summary["status"], "failed")
+                    self.assertEqual(summary["failure_phase"], "provenance")
+                    self.assertIn("git revision", summary["error"])
+                    self.assertEqual(persisted, summary)
+                    validate.assert_not_called()
 
     def test_final_publication_failure_leaves_running_marker(self):
         import turner2018_l32_server as server
