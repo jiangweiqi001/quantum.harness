@@ -16,12 +16,19 @@ import tempfile
 import tomllib
 import urllib.request
 
+from packaging.tags import compatible_tags, cpython_tags
+from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+
 
 MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
-COMPATIBLE_LINUX_TAGS = {
-    "manylinux2014_x86_64",
-    "manylinux_2_17_x86_64",
+TARGET_PYTHON = (3, 12)
+MAX_GLIBC = (2, 17)
+LEGACY_MANYLINUX_FLOORS = {
+    "manylinux1_x86_64": (2, 5),
+    "manylinux2010_x86_64": (2, 12),
+    "manylinux2014_x86_64": (2, 17),
 }
+VERSIONED_MANYLINUX = re.compile(r"manylinux_(\d+)_(\d+)_x86_64\Z")
 ISOLATED_SMOKE_SOURCE = """\
 import importlib
 import importlib.metadata
@@ -66,22 +73,62 @@ def _validate_smoke_import(manifest: dict) -> dict:
     return smoke
 
 
+def _manylinux_floor(platform: str) -> tuple[int, int] | None:
+    if platform in LEGACY_MANYLINUX_FLOORS:
+        return LEGACY_MANYLINUX_FLOORS[platform]
+    match = VERSIONED_MANYLINUX.fullmatch(platform)
+    if match is None or match.group(1) != "2":
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
 def _validate_wheel_platform(filename: str) -> None:
-    if not isinstance(filename, str) or not filename.endswith(".whl"):
+    if (
+        not isinstance(filename, str)
+        or not filename.endswith(".whl")
+        or "/" in filename
+        or "\\" in filename
+    ):
         raise RuntimeError(f"invalid wheel filename: {filename!r}")
     try:
-        _prefix, python_tag, abi_tag, platform = filename[:-4].rsplit("-", 3)
-    except ValueError as error:
+        _name, _version, _build, wheel_tags = parse_wheel_filename(filename)
+    except InvalidWheelFilename as error:
         raise RuntimeError(f"invalid wheel filename: {filename!r}") from error
-    platform_tags = set(platform.split("."))
-    if abi_tag == "none" and platform_tags == {"any"}:
+
+    pure_target_tags = set(
+        compatible_tags(TARGET_PYTHON, interpreter="cp312", platforms=["any"])
+    )
+    if wheel_tags.intersection(pure_target_tags):
         return
-    if python_tag != "cp312" or abi_tag != "cp312":
-        raise RuntimeError(f"unsupported binary wheel tags: {filename}")
-    if not platform_tags.intersection(COMPATIBLE_LINUX_TAGS):
+
+    manylinux_platforms = {
+        tag.platform
+        for tag in wheel_tags
+        if _manylinux_floor(tag.platform) is not None
+    }
+    compatible_platforms = {
+        platform
+        for platform in manylinux_platforms
+        if _manylinux_floor(platform) <= MAX_GLIBC
+    }
+    target_binary_tags = (
+        set(cpython_tags(TARGET_PYTHON, platforms=sorted(compatible_platforms)))
+        if compatible_platforms
+        else set()
+    )
+    if wheel_tags.intersection(target_binary_tags):
+        return
+
+    all_manylinux_target_tags = (
+        set(cpython_tags(TARGET_PYTHON, platforms=sorted(manylinux_platforms)))
+        if manylinux_platforms
+        else set()
+    )
+    if wheel_tags.intersection(all_manylinux_target_tags):
         raise RuntimeError(
             f"binary wheel requires a glibc floor newer than glibc 2.17: {filename}"
         )
+    raise RuntimeError(f"wheel is incompatible with CPython 3.12: {filename}")
 
 
 def load_manifest(path: Path) -> dict:

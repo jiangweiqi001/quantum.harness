@@ -62,3 +62,108 @@ not pruned. Each behavior was implemented only after its failing test.
   remain for the authorized remote follow-up.
 - No real ED job should be submitted until those remote gates pass and the
   user explicitly approves submission.
+
+## Review-fix follow-up
+
+The review identified that the first validator treated every `none-any` wheel
+as compatible without checking its Python tag, and that regenerating the lock
+against the default index rewrote unrelated registry URLs.
+
+The wheel validator now uses `packaging.utils.parse_wheel_filename` and
+`packaging.tags` to evaluate the complete PEP 427 compressed tag set against
+CPython 3.12. It accepts `py3` and `py2.py3` universal wheels, compatible
+CPython `abi3` wheels, and any compatible member of a dual tag. Binary
+candidates must also provide an x86-64 manylinux tag whose glibc floor is no
+newer than 2.17. Python 2-only, CPython 3.13-only, wrong-architecture,
+non-manylinux, malformed, and path-bearing filenames are rejected.
+
+`uv.lock` was regenerated from the base `bfb8a51` lock while retaining its
+Tsinghua registry. The resulting base-to-final lock diff is limited to the six
+changed package records (the four core pins plus ContourPy and Pillow) and the
+project dependency metadata: 73 insertions and 73 deletions. Unrelated package
+records and registry URLs are unchanged. The cleaned lock SHA-256 is
+`2eb458c846b00744136673321f93a2afc190203d8c8e3e73d92764b5a1b1a558`;
+the manifest URLs and lock fingerprint were updated from that lock.
+
+### Review-fix TDD evidence
+
+RED command:
+
+```text
+.venv/bin/python -m pytest scripts/tests/test_turner2018_wheelhouse.py -q
+10 failed, 22 passed in 0.70s
+```
+
+The failures covered Python 2-only and CPython 3.13-only pure wheels,
+incompatible binary interpreter/architecture/platform tags, malformed and
+path-bearing filenames, and intended compatible `abi3`/dual tags rejected by
+the old validator.
+
+GREEN command:
+
+```text
+.venv/bin/python -m pytest scripts/tests/test_turner2018_wheelhouse.py -q
+32 passed in 0.66s
+```
+
+An additional malformed PEP 600 major-version case was then added:
+
+```text
+.venv/bin/python -m pytest scripts/tests/test_turner2018_wheelhouse.py::test_manifest_rejects_wheels_incompatible_with_cpython_3_12 -q
+1 failed, 5 passed in 0.05s
+```
+
+After restricting versioned manylinux tags to the glibc major version, the
+complete focused file passed:
+
+```text
+.venv/bin/python -m pytest scripts/tests/test_turner2018_wheelhouse.py -q
+33 passed in 0.65s
+```
+
+### Review-fix verification evidence
+
+```text
+uv lock --check
+Resolved 39 packages in 0.68ms
+```
+
+```text
+.venv/bin/python -m pytest scripts/tests/test_turner2018_wheelhouse.py scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests -q
+45 passed, 16 subtests passed in 0.99s
+```
+
+```text
+.venv/bin/python scripts/turner2018_wheelhouse.py --smoke
+Successfully installed contourpy-1.3.2 cycler-0.12.1 fonttools-4.63.0 h5py-3.14.0 kiwisolver-1.5.0 matplotlib-3.10.9 numpy-2.2.6 packaging-26.2 pillow-12.2.0 pyparsing-3.3.2 python-dateutil-2.9.0.post0 scipy-1.15.3 six-1.17.0
+{"smoke_import": {"imported_modules": ["numpy", "scipy", "h5py", "matplotlib"], "machine": "x86_64", "python": "3.12.13", "versions": {"h5py": "3.14.0", "matplotlib": "3.10.9", "numpy": "2.2.6", "scipy": "1.15.3"}}, "verified": true}
+```
+
+```text
+.venv/bin/python -m pytest scripts/tests -q
+693 passed, 66 subtests passed in 88.69s
+```
+
+```text
+.venv/bin/python -m py_compile scripts/turner2018_wheelhouse.py scripts/tests/test_turner2018_wheelhouse.py
+uvx ruff check --select E4,E7,E9,F scripts/turner2018_wheelhouse.py scripts/tests/test_turner2018_wheelhouse.py
+All checks passed!
+git diff --check
+exit 0
+```
+
+Final post-hardening gate:
+
+```text
+uv lock --check
+Resolved 39 packages in 0.88ms
+.venv/bin/python -m pytest scripts/tests -q
+694 passed, 66 subtests passed in 93.04s
+.venv/bin/python scripts/turner2018_wheelhouse.py --smoke
+{"smoke_import": {"imported_modules": ["numpy", "scipy", "h5py", "matplotlib"], "machine": "x86_64", "python": "3.12.13", "versions": {"h5py": "3.14.0", "matplotlib": "3.10.9", "numpy": "2.2.6", "scipy": "1.15.3"}}, "verified": true}
+.venv/bin/python -m py_compile scripts/turner2018_wheelhouse.py scripts/tests/test_turner2018_wheelhouse.py
+uvx ruff check --select E4,E7,E9,F scripts/turner2018_wheelhouse.py scripts/tests/test_turner2018_wheelhouse.py
+All checks passed!
+git diff --check
+exit 0
+```

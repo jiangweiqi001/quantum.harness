@@ -112,6 +112,76 @@ def test_manifest_rejects_binary_wheel_above_glibc_2_17(tmp_path):
         load_manifest(path)
 
 
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "synthetic-1.0-py2-none-any.whl",
+        "synthetic-1.0-cp313-none-any.whl",
+        "synthetic-1.0-cp313-cp313-manylinux_2_17_x86_64.whl",
+        "synthetic-1.0-cp312-cp312-manylinux_2_17_aarch64.whl",
+        "synthetic-1.0-cp312-cp312-linux_x86_64.whl",
+        "synthetic-1.0-cp312-cp312-manylinux_1_999_x86_64.whl",
+    ],
+)
+def test_manifest_rejects_wheels_incompatible_with_cpython_3_12(
+    tmp_path, filename
+):
+    manifest = json.loads(MANIFEST.read_text())
+    package = manifest["packages"][0]
+    package["filename"] = filename
+    package["url"] = f"https://example.invalid/{filename}"
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RuntimeError, match="CPython 3.12"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "synthetic-1.0-py3-none.whl",
+        "synthetic-1.0-py3-none-any.whl/../payload.whl",
+        "synthetic--1.0-py3-none-any.whl",
+    ],
+)
+def test_manifest_rejects_malformed_or_malicious_wheel_filenames(
+    tmp_path, filename
+):
+    manifest = json.loads(MANIFEST.read_text())
+    package = manifest["packages"][0]
+    package["filename"] = filename
+    package["url"] = f"https://example.invalid/{filename}"
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RuntimeError, match="invalid wheel filename"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "synthetic-1.0-py3-none-any.whl",
+        "synthetic-1.0-py2.py3-none-any.whl",
+        "synthetic-1.0-cp38-abi3-manylinux_2_17_x86_64.whl",
+        (
+            "synthetic-1.0-cp313.cp312-abi3-"
+            "manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+        ),
+    ],
+)
+def test_manifest_accepts_any_compatible_pep427_tag(tmp_path, filename):
+    manifest = json.loads(MANIFEST.read_text())
+    package = manifest["packages"][0]
+    package["filename"] = filename
+    package["url"] = f"https://example.invalid/{filename}"
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+
+    load_manifest(path)
+
+
 def test_manifest_accepts_dual_tag_with_compatible_manylinux_floor(tmp_path):
     manifest = json.loads(MANIFEST.read_text())
     package = manifest["packages"][0]
