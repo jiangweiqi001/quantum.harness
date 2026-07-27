@@ -11,6 +11,30 @@ from turner2018_ed_engine import (
 )
 
 
+def _scalar_rotate_left(value: int, shift: int, length: int) -> int:
+    mask = (1 << length) - 1
+    shift_mod = shift % length
+    value_masked = value & mask
+    return ((value_masked << shift_mod) | (value_masked >> (length - shift_mod))) & mask
+
+
+def _scalar_reflect(value: int, length: int) -> int:
+    reflected = 0
+    for index in range(length):
+        if (value >> index) & 1:
+            reflected |= 1 << (length - 1 - index)
+    return reflected
+
+
+def _scalar_dihedral_members(value: int, length: int) -> set[int]:
+    reflected = _scalar_reflect(value, length)
+    rotations = {_scalar_rotate_left(value, shift, length) for shift in range(length)}
+    reflected_rotations = {
+        _scalar_rotate_left(reflected, shift, length) for shift in range(length)
+    }
+    return rotations | reflected_rotations
+
+
 def _reference_column_data(length: int):
     constrained = constrained_basis(length, pbc=True)
     transform = symmetry_basis_k0_inversion_even(constrained, length).toarray()
@@ -61,6 +85,44 @@ def test_canonical_dihedral_maps_to_minimum_member():
     assert np.all(canonical == np.min(dihedral_members(int(states[0]), 6)))
 
 
+def test_canonical_dihedral_matches_scalar_dihedral_minimum_l32_high_bits():
+    length = 32
+    states = np.asarray(
+        [
+            (1 << 31) | (1 << 3) | 1,
+            (1 << 30) | (1 << 16) | (1 << 5),
+            (1 << 31) | (1 << 30) | (1 << 9),
+            (1 << 31) | (1 << 30) | (1 << 1) | (1 << 0),
+        ],
+        dtype=np.uint64,
+    )
+
+    expected = np.asarray(
+        [min(_scalar_dihedral_members(int(state), length)) for state in states],
+        dtype=np.uint64,
+    )
+
+    canonical = canonical_dihedral(states, length)
+    assert canonical.dtype == np.uint64
+    np.testing.assert_array_equal(canonical, expected)
+
+
+def test_dihedral_convention_includes_nontrivial_reflection_orbit_members():
+    length = 8
+    state = 0b10110000
+
+    rotation_orbit = {_scalar_rotate_left(state, shift, length) for shift in range(length)}
+    reflected_orbit = {
+        _scalar_rotate_left(_scalar_reflect(state, length), shift, length)
+        for shift in range(length)
+    }
+    assert reflected_orbit - rotation_orbit
+
+    expected = rotation_orbit | reflected_orbit
+    members = dihedral_members(state, length)
+    assert set(members.tolist()) == expected
+
+
 @pytest.mark.parametrize("length", [10, 12, 14])
 def test_orbit_basis_columns_match_reference_transform(length):
     constrained, reference_representatives, reference_sizes, reference_supports = (
@@ -83,6 +145,17 @@ def test_orbit_basis_columns_match_reference_transform(length):
         members = np.unique(dihedral_members(int(representative), length))
         assert len(members) == int(orbit_size)
         assert set(int(member) for member in members) == reference_supports[int(representative)]
+
+
+def test_build_orbit_basis_is_invariant_to_chunk_boundaries():
+    length = 14
+    baseline = build_orbit_basis(length, chunk_size=262144)
+
+    for chunk_size in (1, 2, 7, 31, 32, 33):
+        basis = build_orbit_basis(length, chunk_size=chunk_size)
+        np.testing.assert_array_equal(basis.constrained_states, baseline.constrained_states)
+        np.testing.assert_array_equal(basis.representatives, baseline.representatives)
+        np.testing.assert_array_equal(basis.orbit_sizes, baseline.orbit_sizes)
 
 
 def test_orbit_basis_index_of_validates_representatives():
