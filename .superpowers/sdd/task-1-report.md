@@ -683,3 +683,93 @@ password, API key, or access token in the Dzeshell profile and wrappers.
 - Git author configuration is absent; the commit used per-command
   author/committer values matching repository history without changing Git
   configuration.
+
+---
+
+# Dzeshell Task 1 reviewer-finding remediation
+
+## Status
+DONE
+
+## Findings resolved
+- Spool-copied wrappers now source the common runner from
+  `SLURM_SUBMIT_DIR/scripts/` instead of resolving relative to `BASH_SOURCE`.
+  The regression copies a wrapper outside the repository, supplies a reviewed
+  submit checkout, executes the copy, and observes that checkout's runner.
+- The common runner fixes the production root at
+  `/work/share/giggleliu/jiangweiqi`, canonicalizes repo/runtime/results/Python,
+  validates an optional offline-image path, rejects traversal and external
+  paths, and requires the submit checkout to equal the execution checkout.
+- README test-only commands scope `TURNER_LENGTH` per invocation. A fake
+  `harness_slurm.sh` executes the documented block from ambient
+  `TURNER_LENGTH=99` and records `28`, `30`, and `32`.
+- Runtime validation reads Python and exact NumPy/SciPy/h5py versions from
+  `turner2018_wheelhouse_manifest.json`; any mismatch makes the runner exit
+  under `set -e`.
+- Secret checks cover the profile, all wrappers, and the common runner. They
+  recursively reject secret-bearing profile keys, detect literal assignments
+  to secret/connection-like shell variables, and reject private-key markers,
+  local key paths, Windows paths, and credential-bearing URLs.
+- Live partition, CPU, memory, GRES, wall-time, and shared-root constants remain
+  unchanged. The generic SCNet wrapper remains unchanged.
+
+## Strict TDD evidence
+Reviewer tests were written before production edits.
+
+RED command:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_wheelhouse.py \
+  scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests -q
+```
+RED result:
+```text
+13 failed, 11 passed, 8 subtests passed in 0.68s
+```
+The failures demonstrated missing manifest runtime checks, spool-relative
+runner lookup, leaked README command state, absent canonical path containment,
+and missing traversal/export rejection.
+
+Focused GREEN:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_wheelhouse.py \
+  scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests -q
+```
+```text
+16 passed, 16 subtests passed in 0.61s
+```
+
+Final focused security/profile/runtime regression:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_wheelhouse.py \
+  scripts/tests/test_cluster_profile.py \
+  scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests -q
+```
+```text
+40 passed, 16 subtests passed in 0.53s
+```
+
+## Full verification
+```bash
+.venv/bin/python -m pytest scripts/tests -q
+```
+```text
+652 passed, 11 skipped, 66 subtests passed in 94.29s
+```
+
+`bash -n` covered all Dzeshell wrappers, the common runner, and the unchanged
+SCNet wrapper. `py_compile`, `git diff --check`, and IDE lint inspection all
+completed without errors.
+
+## Implementation commit
+- `6c54bf9` — `Harden Dzeshell production launch path`
+
+## Concerns
+- No real Slurm job was submitted. The spool behavior is simulated locally,
+  while remote scheduler submission remains behind the explicit-approval gate.
+- Canonicalization covers existing symlink components and lexical traversal;
+  no adversarial concurrent filesystem mutation was attempted.
+- Git author configuration remains absent, so commits use per-command identity
+  values matching repository history without changing Git configuration.
