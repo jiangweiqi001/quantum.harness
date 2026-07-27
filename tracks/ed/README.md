@@ -208,6 +208,38 @@ Accepted scheduler responses were test-only pseudo job IDs; no jobs were submitt
 These estimates record the current queue blocker, not authorization for a real
 submission.
 
+LASG02 uses the local SSH alias `lasg02-student090`; host, port, username, and
+private-key configuration remain outside this repository. Its CPU-only wrapper
+accepts L=22, 24, 26, 28, or 30 and requests one `ihicnormal` node with account
+`chenkun2025`, QOS `user_student090`, 24 CPUs, `80000M`, and 24 hours. L=32 is
+rejected and remains on Dzeshell. Validate each scoped request first:
+
+```bash
+ssh lasg02-student090 'cd /public/home/student090/quantum.harness && sbatch --test-only --export=ALL,TURNER_LENGTH=22 scripts/turner2018_lasg02_l22_30.sbatch'
+ssh lasg02-student090 'cd /public/home/student090/quantum.harness && sbatch --test-only --export=ALL,TURNER_LENGTH=24 scripts/turner2018_lasg02_l22_30.sbatch'
+ssh lasg02-student090 'cd /public/home/student090/quantum.harness && sbatch --test-only --export=ALL,TURNER_LENGTH=26 scripts/turner2018_lasg02_l22_30.sbatch'
+ssh lasg02-student090 'cd /public/home/student090/quantum.harness && sbatch --test-only --export=ALL,TURNER_LENGTH=28 scripts/turner2018_lasg02_l22_30.sbatch'
+ssh lasg02-student090 'cd /public/home/student090/quantum.harness && sbatch --test-only --export=ALL,TURNER_LENGTH=30 scripts/turner2018_lasg02_l22_30.sbatch'
+```
+
+After all five test-only requests succeed, submit the authorized production
+jobs with the same explicit length exports:
+
+```bash
+ssh lasg02-student090 'cd /public/home/student090/quantum.harness && sbatch --export=ALL,TURNER_LENGTH=22 scripts/turner2018_lasg02_l22_30.sbatch'
+ssh lasg02-student090 'cd /public/home/student090/quantum.harness && sbatch --export=ALL,TURNER_LENGTH=24 scripts/turner2018_lasg02_l22_30.sbatch'
+ssh lasg02-student090 'cd /public/home/student090/quantum.harness && sbatch --export=ALL,TURNER_LENGTH=26 scripts/turner2018_lasg02_l22_30.sbatch'
+ssh lasg02-student090 'cd /public/home/student090/quantum.harness && sbatch --export=ALL,TURNER_LENGTH=28 scripts/turner2018_lasg02_l22_30.sbatch'
+ssh lasg02-student090 'cd /public/home/student090/quantum.harness && sbatch --export=ALL,TURNER_LENGTH=30 scripts/turner2018_lasg02_l22_30.sbatch'
+```
+
+The runner uses `/public/home/student090/quantum.harness`, its `.venv`, the
+offline CPython 3.12 runtime below `/public/home/student090/python`, and
+length-specific output below `/public/home/student090/results`. It validates
+paths, Slurm resources, runtime provenance, and exact package versions before
+creating output or executing the existing staged ED solver. The solver derives
+declared memory directly from Slurm.
+
 All wrappers request one task for 24 hours and use the exact
 `gpu:NVIDIAA80080GBPCIeLC:<count>` GRES. The common runner defaults to the
 shared checkout `/work/share/giggleliu/jiangweiqi/quantum.harness`, its

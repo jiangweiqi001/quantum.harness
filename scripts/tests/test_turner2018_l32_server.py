@@ -1542,7 +1542,11 @@ class TurnerL32SlurmTests(unittest.TestCase):
                 f"TURNER_LENGTH={length} scripts/harness_slurm.sh", text
             )
             self.assertNotIn(
-                f"sbatch --export=ALL,TURNER_LENGTH={length}", text
+                "ssh qdeshell 'cd /work/share/giggleliu/jiangweiqi/"
+                "quantum.harness && sbatch "
+                f"--export=ALL,TURNER_LENGTH={length} "
+                f"scripts/{script}'",
+                text,
             )
         self.assertIn("test-only pseudo job IDs; no jobs were submitted", text)
         self.assertIn(
@@ -1616,6 +1620,235 @@ class TurnerL32SlurmTests(unittest.TestCase):
                 )
                 self.assertIn(f"scripts/{script}", remote_command)
                 self.assertNotIn("TURNER_LENGTH=99", remote_command)
+
+
+class TurnerLasg02SlurmTests(unittest.TestCase):
+    LASG02_ROOT = "/public/home/student090"
+    WRAPPER = SCRIPTS / "turner2018_lasg02_l22_30.sbatch"
+    RUNNER = SCRIPTS / "turner2018_lasg02_run.sh"
+    LENGTHS = (22, 24, 26, 28, 30)
+
+    def _synthetic_root_wrapper(self, root: Path) -> Path:
+        spool = root.parent / "slurm-spool-copy"
+        spool.write_text(self.WRAPPER.read_text().replace(self.LASG02_ROOT, str(root)))
+        return spool
+
+    @staticmethod
+    def _write_sentinel_runner(submit: Path, sentinel: Path) -> None:
+        scripts = submit / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "turner2018_lasg02_run.sh").write_text(
+            'printf "%s" "$TURNER_LENGTH" > "$RUNNER_SENTINEL"\n'
+        )
+
+    def test_wrapper_has_exact_resources_and_canonical_runner_lookup(self):
+        text = self.WRAPPER.read_text()
+        for directive in (
+            "#SBATCH --partition=ihicnormal",
+            "#SBATCH --account=chenkun2025",
+            "#SBATCH --qos=user_student090",
+            "#SBATCH --nodes=1",
+            "#SBATCH --ntasks=1",
+            "#SBATCH --cpus-per-task=24",
+            "#SBATCH --mem=80000M",
+            "#SBATCH --time=24:00:00",
+        ):
+            self.assertIn(directive, text)
+        self.assertNotRegex(text, r"#SBATCH\s+--gres")
+        self.assertIn('TURNER_ALLOWED_LENGTHS="22|24|26|28|30"', text)
+        self.assertIn('source "$canonical_runner"', text)
+        self.assertNotIn("BASH_SOURCE", text)
+        self.assertNotIn("turner2018_l32_server.py", text)
+        source_position = text.index('source "$canonical_runner"')
+        for required_before_source in (
+            "realpath -e",
+            "canonical_submit_dir=",
+            "canonical_runner=",
+        ):
+            self.assertLess(text.index(required_before_source), source_position)
+
+    def test_copied_wrapper_sources_only_canonical_checkout_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            approved_root = temporary / "approved-root"
+            submit = approved_root / "quantum.harness"
+            sentinel = temporary / "runner-called"
+            self._write_sentinel_runner(submit, sentinel)
+            spool = self._synthetic_root_wrapper(approved_root)
+
+            result = subprocess.run(
+                ["bash", str(spool)],
+                env={
+                    **os.environ,
+                    "SLURM_SUBMIT_DIR": str(submit),
+                    "TURNER_LENGTH": "30",
+                    "RUNNER_SENTINEL": str(sentinel),
+                },
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(sentinel.read_text(), "30")
+
+    def test_wrapper_rejects_unset_missing_and_escaped_submit_dirs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            approved_root = temporary / "approved-root"
+            approved_root.mkdir()
+            spool = self._synthetic_root_wrapper(approved_root)
+            base = {**os.environ, "TURNER_LENGTH": "22"}
+
+            unset = dict(base)
+            unset.pop("SLURM_SUBMIT_DIR", None)
+            result = subprocess.run(
+                ["bash", str(spool)], env=unset, text=True, capture_output=True
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("SLURM_SUBMIT_DIR is required", result.stderr)
+
+            result = subprocess.run(
+                ["bash", str(spool)],
+                env={**base, "SLURM_SUBMIT_DIR": str(approved_root / "missing")},
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("existing directory", result.stderr)
+
+            attacker = temporary / "attacker"
+            sentinel = temporary / "attacker-ran"
+            self._write_sentinel_runner(attacker, sentinel)
+            escaped = approved_root / "escaped"
+            escaped.symlink_to(attacker, target_is_directory=True)
+            result = subprocess.run(
+                ["bash", str(spool)],
+                env={
+                    **base,
+                    "SLURM_SUBMIT_DIR": str(escaped),
+                    "RUNNER_SENTINEL": str(sentinel),
+                },
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("outside", result.stderr)
+            self.assertFalse(sentinel.exists())
+
+    def test_runner_uses_approved_paths_runtime_and_existing_solver(self):
+        text = self.RUNNER.read_text()
+        self.assertIn(f'readonly TURNER_SHARED_ROOT="{self.LASG02_ROOT}"', text)
+        self.assertIn(
+            'TURNER_REPO="${TURNER_REPO:-$TURNER_SHARED_ROOT/quantum.harness}"',
+            text,
+        )
+        self.assertIn(
+            'TURNER_RUNTIME="${TURNER_RUNTIME:-$TURNER_SHARED_ROOT/python/cpython-3.12}"',
+            text,
+        )
+        self.assertIn(
+            'TURNER_OUTPUT_DIR="${TURNER_OUTPUT_DIR:-$TURNER_SHARED_ROOT/results/turner-l${TURNER_LENGTH}}"',
+            text,
+        )
+        self.assertIn(
+            'TURNER_PYTHON="${TURNER_PYTHON:-$TURNER_REPO/.venv/bin/python}"',
+            text,
+        )
+        self.assertIn("realpath -m", text)
+        self.assertIn("turner2018_wheelhouse.py", text)
+        self.assertIn("--check-runtime", text)
+        self.assertIn("turner2018_l32_server.py", text)
+        self.assertIn("--stage all", text.replace("\n", " "))
+        self.assertNotIn("--declared-memory", text)
+        self.assertIn('OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"', text)
+        self.assertLess(text.index("--check-runtime"), text.index("mkdir -p"))
+        self.assertLess(text.index("--check-runtime"), text.index("exec \"$TURNER_PYTHON\""))
+
+        manifest = json.loads(
+            (SCRIPTS / "turner2018_wheelhouse_manifest.json").read_text()
+        )
+        self.assertEqual(
+            manifest["smoke_import"]["expected_versions"],
+            {
+                "numpy": "2.2.6",
+                "scipy": "1.15.3",
+                "h5py": "3.14.0",
+                "matplotlib": "3.10.9",
+            },
+        )
+
+    def test_runner_rejects_length_resource_and_path_mismatches(self):
+        base = {
+            **os.environ,
+            "TURNER_ALLOWED_LENGTHS": "22|24|26|28|30",
+            "TURNER_LENGTH": "22",
+            "SLURM_CPUS_PER_TASK": "24",
+            "SLURM_MEM_PER_NODE": "80000M",
+        }
+        cases = (
+            ("TURNER_LENGTH", "32"),
+            ("TURNER_LENGTH", "23"),
+            ("SLURM_CPUS_PER_TASK", "23"),
+            ("SLURM_MEM_PER_NODE", "79999M"),
+            ("TURNER_REPO", "/tmp/checkout"),
+            ("TURNER_OUTPUT_DIR", str(Path.home() / "results")),
+            ("TURNER_PYTHON", "/usr/bin/python3"),
+            ("TURNER_RUNTIME", "/opt/cpython-3.12"),
+        )
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                result = subprocess.run(
+                    ["bash", str(self.RUNNER)],
+                    env={**base, key: value},
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(key, result.stderr)
+
+    def test_lasg02_tracked_files_contain_no_private_connection_material(self):
+        profile_path = (
+            REPO
+            / "skills"
+            / "using-slurm"
+            / "profiles"
+            / "lasg02-student090.toml"
+        )
+        profile = tomllib.loads(profile_path.read_text())
+        self.assertEqual(
+            profile["connection"]["ssh"], {"alias": "lasg02-student090"}
+        )
+        tracked = [profile_path, self.WRAPPER, self.RUNNER]
+        forbidden_literals = (
+            "-----BEGIN",
+            "~/.ssh",
+            "identityfile",
+            "private key",
+            "private_key",
+        )
+        for path in tracked:
+            with self.subTest(path=path.name):
+                text = path.read_text().lower()
+                for literal in forbidden_literals:
+                    self.assertNotIn(literal.lower(), text)
+                self.assertIsNone(
+                    re.search(r"(?:ssh|https?)://[^/\s:@]+:[^@\s]+@", text)
+                )
+
+    def test_documented_lasg02_submissions_export_each_length_explicitly(self):
+        text = (REPO / "tracks" / "ed" / "README.md").read_text()
+        for length in self.LENGTHS:
+            prefix = (
+                "ssh lasg02-student090 'cd /public/home/student090/"
+                "quantum.harness && sbatch "
+            )
+            export = f"--export=ALL,TURNER_LENGTH={length} "
+            script = "scripts/turner2018_lasg02_l22_30.sbatch'"
+            self.assertIn(prefix + "--test-only " + export + script, text)
+            self.assertIn(prefix + export + script, text)
+        self.assertNotIn(
+            "sbatch scripts/turner2018_lasg02_l22_30.sbatch", text
+        )
 
 
 @unittest.skipUnless(

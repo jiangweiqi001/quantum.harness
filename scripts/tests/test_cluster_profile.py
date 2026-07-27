@@ -237,6 +237,86 @@ def test_public_qdeshell_profile_is_safe_and_complete():
         assert forbidden_fragment not in raw.lower()
 
 
+def test_public_lasg02_profile_is_safe_and_complete():
+    root = cp.Path(__file__).resolve().parents[2]
+    path = root / "skills/using-slurm/profiles/lasg02-student090.toml"
+    mirror_path = root / ".agents/skills/using-slurm/profiles/lasg02-student090.toml"
+    profile = cp.load_profile(path)
+
+    assert cp.validate(profile) == []
+    assert mirror_path.read_bytes() == path.read_bytes()
+    assert profile["connection"]["repo_path_remote"] == (
+        "/public/home/student090/quantum.harness"
+    )
+    assert profile["connection"]["ssh"] == {"alias": "lasg02-student090"}
+    assert profile["scheduler"] == {
+        "type": "slurm",
+        "default_partition": "ihicnormal",
+        "account": "chenkun2025",
+        "qos": "user_student090",
+    }
+
+    partition = profile["partitions"][0]
+    assert partition == {
+        "name": "ihicnormal",
+        "class": "cpu",
+        "cores": 28,
+        "memory": "94179M",
+        "def_mem_per_cpu": "3363M",
+        "max_wall": "24:00:00",
+    }
+
+    limits = cp.get_limits(profile)
+    assert limits.hard == {
+        "max_walltime": "24:00:00",
+        "max_nodes": 1,
+        "max_cpus": 28,
+        "max_array_size": 200,
+    }
+    assert limits.allowed_roots == [
+        "/public/home/student090/results",
+        "/public/home/student090/quantum.harness/results",
+    ]
+    assert profile["filesystem"] == {
+        "home": "/public/home/student090",
+        "scratch": "/public/home/student090/results",
+        "project": "/public/home/student090/quantum.harness",
+        "quota": "",
+    }
+    assert profile["network"] == {
+        "internet_from_login": False,
+        "internet_from_compute": False,
+    }
+
+    forbidden_keys = {
+        "host",
+        "hostname",
+        "user",
+        "username",
+        "port",
+        "key",
+        "key_path",
+        "identity_file",
+        "password",
+        "token",
+        "secret",
+    }
+
+    def all_keys(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                yield key.lower()
+                yield from all_keys(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from all_keys(child)
+
+    assert forbidden_keys.isdisjoint(all_keys(profile))
+    raw = path.read_text(encoding="utf-8").lower()
+    for forbidden_fragment in ("~/.ssh", "private key", "identityfile"):
+        assert forbidden_fragment not in raw
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #

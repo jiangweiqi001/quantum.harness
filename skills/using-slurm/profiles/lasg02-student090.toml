@@ -1,0 +1,74 @@
+[identity]
+name = "lasg02-student090"
+purpose = "LASG02 student CPU compute service"
+maintainer = "QuantumBFS"
+
+[connection]
+repo_path_remote = "/public/home/student090/quantum.harness"
+login_shell = false
+
+[connection.ssh]
+alias = "lasg02-student090"
+
+[scheduler]
+type = "slurm"
+default_partition = "ihicnormal"
+account = "chenkun2025"
+qos = "user_student090"
+
+[[partitions]]
+name = "ihicnormal"
+class = "cpu"
+cores = 28
+memory = "94179M"
+def_mem_per_cpu = "3363M"
+max_wall = "24:00:00"
+
+[filesystem]
+home = "/public/home/student090"
+scratch = "/public/home/student090/results"
+project = "/public/home/student090/quantum.harness"
+quota = ""
+
+[network]
+internet_from_login = false
+internet_from_compute = false
+
+[region]
+region = "mainland_china"
+
+[limits.hard]
+max_walltime = "24:00:00"
+max_nodes = 1
+max_cpus = 28
+max_array_size = 200
+
+[limits.soft]
+warn_walltime = "08:00:00"
+warn_cpus = 24
+unusual_partitions = []
+
+[limits.paths]
+allowed_roots = [
+  "/public/home/student090/results",
+  "/public/home/student090/quantum.harness/results",
+]
+
+[[gotchas]]
+symptom = "The L=32 dense solve exceeds standard-node memory"
+cause = "The L=32 eigensolver requires approximately 240 GB"
+fix = "reject L=32 on LASG02 and keep that size on Dzeshell"
+
+[[gotchas]]
+symptom = "Runtime installation or downloads fail on cluster nodes"
+cause = "Login and compute nodes have no internet access"
+fix = "use the approved portable CPython runtime and repository virtual environment"
+
+[commands]
+squeue = "squeue -u $USER"
+sacct = "sacct --format=JobID,State,ExitCode,MaxRSS,Elapsed"
+sinfo = "sinfo -o '%P %a %.10l %.6D %.6t'"
+quota_command = "sacctmgr -n -P show assoc where user=$USER format=Account,Partition,QOS,GrpTRES,MaxTRES"
+
+[notes]
+text = "Use one ihicnormal node with 24 CPUs, 80000M, and 24 hours for Turner L=22,24,26,28,30. Login and compute nodes are offline."
