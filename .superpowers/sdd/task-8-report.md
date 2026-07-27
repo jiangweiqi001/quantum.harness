@@ -6,6 +6,8 @@ Implemented and locally committed on `independent-pxp-ed`.
 
 - Approved baseline: `0cb2198 Use logarithmic overlap scale in Fig. 3`
 - Implementation commit: `e15dd8c Render Fig. 4 from validated independent spectra`
+- Review remediation commit:
+  `32d319c Harden independent figure publication and restart validation`
 - Push: not performed
 
 ## RED evidence
@@ -38,9 +40,9 @@ complete generation.
 - Uses `paper_exact_level_statistics` unchanged on independent sorted energies:
   `D//5:D//2-500`, cubic unfolding, 50-level edge trim, no spacing
   renormalization, and no extra zero-energy filter.
-- Produces one all-size overview and one transactional PNG/JSON/NPZ generation
-  per available independent length. Missing sizes are reported and never
-  bridged or substituted.
+- Produces one all-size overview and one PNG/JSON/NPZ set per available
+  independent length, and publishes the entire collection as one transactional
+  generation. Missing sizes are reported and never bridged or substituted.
 - DOI histograms are visually separate overlays and mismatch inputs only.
 - Sidecars include source hashes, dimensions, window bounds/count, polynomial
   coefficients, conventions, histogram bins/counts/densities, DOI mismatches,
@@ -63,7 +65,8 @@ Focused/regression command:
   scripts/tests/test_turner2018_l32_server.py -q
 ```
 
-Result: `213 passed, 10 skipped, 23 subtests passed in 23.90s`.
+Result after review remediation:
+`228 passed, 10 skipped, 29 subtests passed in 29.18s`.
 
 `py_compile` passed for all modified Python modules and tests. IDE lints reported
 no errors. `git diff --check` passed.
@@ -71,24 +74,29 @@ no errors. `git diff --check` passed.
 ## Real L20 render and combined stage
 
 The current fingerprint forced a fresh real L20 Task 6 workflow through
-validation. The combined figures stage then completed and its immediate restart
-reported `skipped stage=figures`.
+validation. The combined figures stage was rebuilt twice successfully, then an
+immediate restart deeply revalidated its references and reported
+`skipped stage=figures`.
 
 - Fig. 4 overview:
   `tracks/ed/results/turner-2018/task7-independent/L20/figures/fig4_independent_all.png`
 - Fig. 4 L20:
   `tracks/ed/results/turner-2018/task7-independent/L20/figures/fig4_independent_L20.png`
 - Fig. 4 L20 JSON/NPZ use generation
-  `f479aa27-f883-4146-8df1-ba4d3fbcca97`
+  `2ccce11f-003e-4903-b445-be698c8378a5`; the overview and L20 triplets share
+  this whole-set generation identity.
 - Fig. 4 L20 PNG SHA-256:
   `bd0210d61fed9e661958a8547c61b62bea2c0ba51ed2c226f15bcc59df16bbf5`
 - Fig. 4 L20 NPZ SHA-256:
-  `fb7e788224d62ee5400a14a3bcfe9a168af30fd21cb5c8a9e86b8aa7959a5b1c`
+  `190a8e699f42c78e9316fb3e343e790b58fe682d9627b363852e4140cdd28ba0`
 - Full/sector dimensions: `15127 / 455`
 - Exact raw window bounds/count: `[91, -273] / 91`
+- Exact resolved nonnegative bounds: `[91, 182]`
 - Eigenvectors: shape `[455,455]`, chunks `[455,1]`, dtype `float64`,
   access `metadata-only`
-- Acceptance: passed
+- Provenance/render acceptance: passed
+- Statistics/histogram acceptance: unavailable/false
+- Overall local mode: `provenance-only` (passed)
 
 The L20 image and sidecars were inspected. The exact paper slice contains only
 91 levels, fewer than the 102 required to trim 50 levels from each edge and
@@ -102,6 +110,40 @@ The corrected Fig. 3 output was also inspected at:
 
 Panel (a) uses the approved logarithmic overlap axis from `0cb2198`. The combined
 manifest records passing, hash-checked Fig. 3 and Fig. 4 generations.
+
+## Review remediation evidence
+
+The review RED suites reproduced every reported gap:
+
+- Both Fig. 3 and Fig. 4 discovery attempted to ingest
+  `figures/manifest.json`.
+- A completed figures stage skipped after a referenced figure asset was
+  corrupted.
+- Mixed JSON/NPZ generation identities were accepted.
+- Later-size Fig. 4 write/rename failures left earlier new outputs published.
+- Per-size JSON leaked all-size lengths and series.
+- DOI overlays lacked archive/member hashes.
+- Shared rollback deleted backups after injected unlink/link restoration
+  failures.
+- L20 sidecars did not distinguish provenance acceptance from histogram
+  availability.
+
+The GREEN tests now verify:
+
+- Discovery uses only `stages/plan.json` roots, so rendering and rerendering do
+  not discover output manifests.
+- Restart skip revalidates all six referenced Fig. 3/Fig. 4 PNG/NPZ/JSON files,
+  their hashes, JSON/NPZ generation identity, provenance, and acceptance.
+- Production L=28/30/32 requires accepted exact statistics; L20 is explicitly
+  provenance-only.
+- Overview and every size-specific triplet roll back together on later-size
+  write or rename failure, both with and without a prior generation.
+- Shared publication preserves recoverable backups under injected rollback
+  unlink, restore-link, restore-fsync, and cleanup failures.
+- Per-size JSON and NPZ contain exactly one matching length/series set.
+- DOI provenance records resolved archive path, archive/member byte sizes, and
+  archive/member SHA-256 values.
+- Raw Python bounds and resolved nonnegative slice bounds are both persisted.
 
 ## Concerns
 
