@@ -68,6 +68,14 @@ def _fsync_parent_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _remove_path_durable(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_parent_directory(path)
+
+
 def _git_revision() -> str | None:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -242,6 +250,9 @@ def _publish_stage_transactional(
                 old_artifact_bytes=old_artifact_bytes,
                 old_manifest_bytes=old_manifest_bytes,
             )
+        else:
+            _remove_path_durable(artifact_path)
+            _remove_path_durable(manifest_path)
         raise
     finally:
         _cleanup_temp(artifact_path.with_name(artifact_path.name + ".backup"))

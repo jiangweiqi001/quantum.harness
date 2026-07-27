@@ -113,6 +113,69 @@ def test_manifest_publication_failure_rolls_back_prior_stage_and_cleans_temp_fil
     assert not (output_dir / "stages" / "eigensystem.json.backup").exists()
 
 
+def test_first_publish_manifest_failure_rolls_back_to_no_stage_and_fsyncs_cleanup(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path
+    target = output_dir / "eigensystem.h5"
+    manifest = output_dir / "stages" / "eigensystem.json"
+
+    original_replace = artifacts.os.replace
+    original_fsync = artifacts.os.fsync
+    directory_fsyncs: list[int] = []
+
+    def fail_manifest_replace(source, destination):
+        src = Path(source)
+        dst = Path(destination)
+        if dst == manifest:
+            raise RuntimeError("simulated first publish manifest failure")
+        return original_replace(src, dst)
+
+    def tracking_fsync(fd: int):
+        mode = stat.S_IFMT(artifacts.os.fstat(fd).st_mode)
+        if mode == stat.S_IFDIR:
+            directory_fsyncs.append(fd)
+        return original_fsync(fd)
+
+    monkeypatch.setattr(artifacts.os, "replace", fail_manifest_replace)
+    monkeypatch.setattr(artifacts.os, "fsync", tracking_fsync)
+
+    with pytest.raises(RuntimeError, match="simulated first publish manifest failure"):
+        write_eigensystem(output_dir, energies=np.asarray([1.0]), vectors=np.eye(1))
+
+    assert not target.exists()
+    assert not manifest.exists()
+    assert not (output_dir / "eigensystem.h5.partial").exists()
+    assert not (output_dir / "eigensystem.h5.backup").exists()
+    assert not (output_dir / "stages" / "eigensystem.json.partial").exists()
+    assert not (output_dir / "stages" / "eigensystem.json.backup").exists()
+    # Includes fsync from normal artifact publish and cleanup removal rollback.
+    assert len(directory_fsyncs) >= 2
+
+
+def test_first_publish_artifact_replace_failure_leaves_no_fixed_target(tmp_path, monkeypatch):
+    output_dir = tmp_path
+    target = output_dir / "eigensystem.h5"
+    original_replace = artifacts.os.replace
+
+    def fail_artifact_replace(source, destination):
+        src = Path(source)
+        dst = Path(destination)
+        if dst == target:
+            raise RuntimeError("simulated artifact replace failure")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(artifacts.os, "replace", fail_artifact_replace)
+
+    with pytest.raises(RuntimeError, match="simulated artifact replace failure"):
+        write_eigensystem(output_dir, energies=np.asarray([1.0]), vectors=np.eye(1))
+
+    assert not target.exists()
+    assert not (output_dir / "eigensystem.h5.partial").exists()
+    assert not (output_dir / "eigensystem.h5.backup").exists()
+    assert not (output_dir / "stages" / "eigensystem.json").exists()
+
+
 def test_validate_stage_rejects_absolute_artifact_path(tmp_path):
     output_dir = tmp_path
     write_eigensystem(output_dir, energies=np.asarray([1.0]), vectors=np.eye(1))
