@@ -8,6 +8,8 @@ Implemented and locally committed on `independent-pxp-ed`.
 - Implementation commit: `e15dd8c Render Fig. 4 from validated independent spectra`
 - Review remediation commit:
   `32d319c Harden independent figure publication and restart validation`
+- Second re-review code commit:
+  `82798b8 Close remaining figure fail-closed gaps`
 - Push: not performed
 
 ## RED evidence
@@ -65,8 +67,8 @@ Focused/regression command:
   scripts/tests/test_turner2018_l32_server.py -q
 ```
 
-Result after review remediation:
-`228 passed, 10 skipped, 29 subtests passed in 29.18s`.
+Result after second re-review remediation:
+`231 passed, 10 skipped, 34 subtests passed in 26.04s`.
 
 `py_compile` passed for all modified Python modules and tests. IDE lints reported
 no errors. `git diff --check` passed.
@@ -83,12 +85,12 @@ immediate restart deeply revalidated its references and reported
 - Fig. 4 L20:
   `tracks/ed/results/turner-2018/task7-independent/L20/figures/fig4_independent_L20.png`
 - Fig. 4 L20 JSON/NPZ use generation
-  `2ccce11f-003e-4903-b445-be698c8378a5`; the overview and L20 triplets share
+  `95e2f33e-6993-46d3-b5de-523aa4e62dfe`; the overview and L20 triplets share
   this whole-set generation identity.
 - Fig. 4 L20 PNG SHA-256:
   `bd0210d61fed9e661958a8547c61b62bea2c0ba51ed2c226f15bcc59df16bbf5`
 - Fig. 4 L20 NPZ SHA-256:
-  `190a8e699f42c78e9316fb3e343e790b58fe682d9627b363852e4140cdd28ba0`
+  `b96a333b3a6bc0e921db1a0b0e3bfa58377e3fd77aa92a04ce13730aadef7358`
 - Full/sector dimensions: `15127 / 455`
 - Exact raw window bounds/count: `[91, -273] / 91`
 - Exact resolved nonnegative bounds: `[91, 182]`
@@ -132,8 +134,10 @@ The GREEN tests now verify:
 
 - Discovery uses only `stages/plan.json` roots, so rendering and rerendering do
   not discover output manifests.
-- Restart skip revalidates all six referenced Fig. 3/Fig. 4 PNG/NPZ/JSON files,
-  their hashes, JSON/NPZ generation identity, provenance, and acceptance.
+- Restart skip revalidates the Fig. 3 triplet plus every overview and
+  size-specific Fig. 4 PNG/NPZ/JSON triplet, their hashes, JSON/NPZ generation
+  identity, scoped lengths/series, provenance, render status, and statistics
+  acceptance.
 - Production L=28/30/32 requires accepted exact statistics; L20 is explicitly
   provenance-only.
 - Overview and every size-specific triplet roll back together on later-size
@@ -144,6 +148,54 @@ The GREEN tests now verify:
 - DOI provenance records resolved archive path, archive/member byte sizes, and
   archive/member SHA-256 values.
 - Raw Python bounds and resolved nonnegative slice bounds are both persisted.
+
+## Second re-review fail-closed evidence
+
+The new RED runs reproduced the four residual gaps:
+
+- The combined manifest represented Fig. 4 as one overview record, so the L20
+  size triplet was not enumerated or revalidated.
+- Production acceptance allowed false `provenance_passed` or `render_passed`
+  when statistics happened to pass.
+- Replacing `level_statistics.zip` between parsing and hashing could bind
+  plotted arrays to different archive bytes than the recorded hash.
+- Injecting backup-unlink failure at cleanup positions 0, 1, and 2 left no
+  explicit durable state describing the valid current generation and remaining
+  backups.
+
+The GREEN implementation and tests establish:
+
+- `figures/manifest.json` now records `fig4.overview` and a `fig4.sizes` entry
+  for every available length. Restart reconstructs and compares the complete
+  set; it validates every triplet's hashes and shared generation ID, and checks
+  JSON/NPZ length scope plus per-length provenance/histogram acceptance.
+- L=28/30/32 requires top-level provenance and render acceptance, required and
+  passing statistics, and passing per-length provenance and histogram checks.
+  Nonproduction L20 remains explicitly accepted in `provenance-only` mode.
+- DOI members are read through one open archive handle. The archive is hashed
+  before and after member consumption, and each member hash is calculated from
+  the exact bytes parsed into the plotted array. A path-replacement race test
+  proves the loaded array and recorded hash remain bound to the original open
+  snapshot.
+- Before sequential backup cleanup, publication durably records a recovery
+  manifest containing hashes of the complete current generation and the
+  backup inventory. It updates that inventory after each deletion; any failure
+  leaves `backup-cleanup-failed` bookkeeping. Parameterized failures at every
+  backup position preserve the complete new generation plus accurate remaining
+  backup state. Successful cleanup removes the recovery manifest.
+
+Real L20 evidence after the second re-review:
+
+- A fresh fingerprint-driven `--stage all` completed all scientific stages.
+- `--stage figures --rebuild` completed, then an immediate restart reported
+  `skipped stage=figures`.
+- Appending corrupt bytes to the real
+  `fig4_independent_L20.npz` caused restart exit code 2 with
+  `Fig. 4 generation asset hash check failed`. Restoring the exact bytes made
+  the next restart report `skipped stage=figures`.
+- The real combined manifest contains the overview and L20 records, each with
+  all three asset hashes and shared generation ID. No recovery manifest remains
+  after successful publication.
 
 ## Concerns
 
