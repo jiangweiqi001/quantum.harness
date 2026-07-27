@@ -113,6 +113,78 @@ def test_manifest_publication_failure_rolls_back_prior_stage_and_cleans_temp_fil
     assert not (output_dir / "stages" / "eigensystem.json.backup").exists()
 
 
+def test_transactional_rollback_never_reads_giant_artifacts_into_memory(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path
+    write_eigensystem(output_dir, energies=np.asarray([0.0]), vectors=np.eye(1))
+    target = output_dir / "eigensystem.h5"
+    original_sha = artifacts._sha256(target)
+    manifest = output_dir / "stages" / "eigensystem.json"
+    original_replace = artifacts.os.replace
+
+    def forbidden_read_bytes(self):
+        raise AssertionError("transaction rollback must not call read_bytes")
+
+    def fail_manifest_replace(source, destination):
+        if Path(destination) == manifest:
+            raise RuntimeError("manifest failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
+    monkeypatch.setattr(artifacts.os, "replace", fail_manifest_replace)
+    with pytest.raises(RuntimeError, match="manifest failure"):
+        write_eigensystem(
+            output_dir,
+            energies=np.asarray([2.0]),
+            vectors=np.eye(1),
+        )
+    assert artifacts._sha256(target) == original_sha
+    validate_stage(output_dir, "eigensystem")
+
+
+def test_validate_stage_enforces_schema_metadata_inputs_and_hdf5_structure(tmp_path):
+    output_dir = tmp_path
+    write_eigensystem(
+        output_dir,
+        energies=np.asarray([0.0, 1.0]),
+        vectors=np.eye(2),
+        inputs={"hamiltonian": "a" * 64},
+        plan_sha256="b" * 64,
+    )
+    manifest = output_dir / "stages" / "eigensystem.json"
+    original = json.loads(manifest.read_text())
+    validate_stage(output_dir, "eigensystem")
+
+    mutations = (
+        ("schema_version", "wrong"),
+        ("inputs", {"hamiltonian": "bad"}),
+        ("plan_sha256", "bad"),
+        ("artifact.shape", [999]),
+        ("artifact.dtype", "float32"),
+        ("artifact.conventions", []),
+    )
+    for dotted, value in mutations:
+        payload = json.loads(json.dumps(original))
+        target = payload
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            target = target[part]
+        target[parts[-1]] = value
+        manifest.write_text(json.dumps(payload))
+        with pytest.raises(RuntimeError):
+            validate_stage(output_dir, "eigensystem")
+    manifest.write_text(json.dumps(original))
+
+    with h5py.File(output_dir / "eigensystem.h5", "r+") as handle:
+        del handle["eigensystem/energies"]
+    payload = json.loads(manifest.read_text())
+    payload["artifact"]["sha256"] = artifacts._sha256(output_dir / "eigensystem.h5")
+    manifest.write_text(json.dumps(payload))
+    with pytest.raises(RuntimeError, match="energies"):
+        validate_stage(output_dir, "eigensystem")
+
+
 def test_first_publish_manifest_failure_rolls_back_to_no_stage_and_fsyncs_cleanup(
     tmp_path, monkeypatch
 ):

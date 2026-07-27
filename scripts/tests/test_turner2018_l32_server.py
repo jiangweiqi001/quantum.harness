@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import subprocess
@@ -55,18 +56,15 @@ class TurnerL32PlanTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "basis.*not complete"):
                 require_stage(root, "basis")
 
-            artifact = root / "basis.npz"
-            artifact.write_bytes(b"basis")
-            atomic_write_json(
-                root / "stages" / "basis.json",
-                {
-                    "stage": "basis",
-                    "status": "complete",
-                    "artifact": {
-                        "path": "basis.npz",
-                        "sha256": __import__("hashlib").sha256(b"basis").hexdigest(),
-                    },
-                },
+            main(
+                [
+                    "--stage",
+                    "basis",
+                    "--length",
+                    "10",
+                    "--output-dir",
+                    str(root),
+                ]
             )
             manifest = require_stage(root, "basis")
             self.assertEqual(manifest["stage"], "basis")
@@ -132,6 +130,25 @@ class TurnerL32PlanTests(unittest.TestCase):
             ),
             8192 * 64 * 2**20,
         )
+
+    def test_scheduler_memory_caps_cli_overclaim(self):
+        self.assertEqual(
+            resolve_declared_memory_bytes(
+                {"SLURM_MEM_PER_NODE": "1024"},
+                "2G",
+            ),
+            1024 * 2**20,
+        )
+
+    def test_scheduler_memory_rejects_malformed_cpu_counts(self):
+        for environment in (
+            {"SLURM_MEM_PER_CPU": "1024", "SLURM_CPUS_PER_TASK": "bad"},
+            {"SLURM_MEM_PER_CPU": "1024", "SLURM_CPUS_ON_NODE": "0"},
+            {"SLURM_MEM_PER_CPU": "bogus", "SLURM_CPUS_PER_TASK": "2"},
+        ):
+            with self.subTest(environment=environment):
+                with self.assertRaises((ValueError, RuntimeError)):
+                    resolve_declared_memory_bytes(environment)
 
 
 @unittest.skipUnless(
@@ -227,6 +244,35 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             self.assertEqual(failure["status"], "failed")
             self.assertIn("sha256 mismatch", failure["error"])
 
+    def test_rebuilt_basis_invalidates_and_recomputes_clean_downstream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "all")
+            old = {
+                stage: json.loads((output / "stages" / f"{stage}.json").read_text())
+                for stage in ("basis", "hamiltonian", "diagonalize", "observables", "validate")
+            }
+            (output / "stages" / "basis.json").unlink()
+            self.run_stage(output, "basis")
+            code, restarted = self.run_stage(output, "all")
+            self.assertEqual(code, 0)
+            for stage in ("hamiltonian", "diagonalize", "observables", "validate"):
+                self.assertIn(f"completed stage={stage}", restarted)
+                current = json.loads(
+                    (output / "stages" / f"{stage}.json").read_text()
+                )
+                self.assertNotEqual(current["generation_id"], old[stage]["generation_id"])
+
+    def test_direct_observables_rejects_corrupt_hamiltonian(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "all")
+            with (output / "hamiltonian.csr.npz").open("ab") as handle:
+                handle.write(b"corrupt")
+            (output / "stages" / "observables.json").unlink()
+            with self.assertRaisesRegex(RuntimeError, "hamiltonian.*sha256"):
+                self.run_stage(output, "observables")
+
     def test_eigensystem_and_observables_are_separate_files(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
@@ -246,6 +292,79 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "figure renderer adapter is unavailable"):
                 self.run_stage(output, "figures")
             self.assertFalse((output / "stages" / "figures.json").exists())
+
+    def test_observables_and_validate_never_full_slice_eigenvectors(self):
+        import h5py
+
+        original = h5py.Dataset.__getitem__
+
+        def reject_full_slice(dataset, key):
+            if dataset.name.endswith("/vectors"):
+                full = key == slice(None)
+                if isinstance(key, tuple) and len(key) == 2:
+                    full = all(
+                        isinstance(part, slice) and part == slice(None)
+                        for part in key
+                    )
+                if full:
+                    raise AssertionError("full eigenvector slicing is forbidden")
+            return original(dataset, key)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "basis")
+            self.run_stage(output, "hamiltonian")
+            self.run_stage(output, "diagonalize")
+            with mock.patch.object(h5py.Dataset, "__getitem__", reject_full_slice):
+                self.run_stage(output, "observables")
+                self.run_stage(output, "validate")
+
+    def test_validate_writes_real_bounded_scientific_metrics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "all")
+            metrics = json.loads(
+                (output / "validation" / "metrics.json").read_text()
+            )
+            self.assertTrue(metrics["passed"])
+            for name in (
+                "basis_full_dimension",
+                "basis_sector_dimension",
+                "hamiltonian_hermiticity",
+                "energies_sorted",
+                "eigenvector_norm",
+                "eigenpair_residual",
+                "eigenvector_orthogonality",
+                "z2_overlap_sum",
+                "observables_finite",
+            ):
+                self.assertIn(name, metrics["metrics"])
+                self.assertIn("passed", metrics["metrics"][name])
+            self.assertEqual(metrics["eigenvector_access"], "column-chunked")
+
+    def test_validate_publishes_failed_metrics_for_scientific_corruption(self):
+        import h5py
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "all")
+            with h5py.File(output / "observables.h5", "r+") as handle:
+                handle["observables/overlap_z2"][:] = 0.0
+            manifest_path = output / "stages" / "observables.json"
+            manifest = json.loads(manifest_path.read_text())
+            with (output / "observables.h5").open("rb") as handle:
+                manifest["artifact"]["sha256"] = hashlib.file_digest(
+                    handle, "sha256"
+                ).hexdigest()
+            atomic_write_json(manifest_path, manifest)
+
+            with self.assertRaisesRegex(RuntimeError, "scientific validation failed"):
+                self.run_stage(output, "validate")
+            metrics = json.loads(
+                (output / "validation" / "metrics.json").read_text()
+            )
+            self.assertFalse(metrics["passed"])
+            self.assertFalse(metrics["metrics"]["z2_overlap_sum"]["passed"])
 
     def test_insufficient_declared_memory_fails_before_dense_conversion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -275,14 +394,14 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             self.run_stage(output, "basis")
             manifest = (output / "stages" / "basis.json").read_bytes()
             with mock.patch(
-                "turner2018_l32_server.validate_stage",
-                side_effect=RuntimeError("injected validation failure"),
+                "turner2018_l32_server.build_orbit_basis",
+                side_effect=RuntimeError("injected basis rerun failure"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "injected validation failure"):
-                    self.run_stage(output, "basis")
+                with self.assertRaisesRegex(RuntimeError, "basis rerun failure"):
+                    self.run_stage(output, "basis", "--rebuild")
             self.assertEqual(manifest, (output / "stages" / "basis.json").read_bytes())
             failure = json.loads(
-                (output / "stages" / "plan.failure.json").read_text()
+                (output / "stages" / "basis.failure.json").read_text()
             )
             self.assertEqual(failure["status"], "failed")
 
@@ -306,7 +425,7 @@ class TurnerL32SlurmTests(unittest.TestCase):
         self.assertIn("TURNER_LENGTH", text)
         self.assertRegex(text, r"28\|30\|32")
         self.assertIn("--stage all", text.replace("\n", " "))
-        self.assertIn("--declared-memory 512G", text.replace("\n", " "))
+        self.assertNotIn("--declared-memory", text)
         self.assertIn("TURNER_OFFLINE_IMAGE", text)
         self.assertIn("TURNER_OUTPUT_DIR", text)
         self.assertNotRegex(text, r"(?i)(password|api[_-]?key|access[_-]?token)\s*=")
@@ -328,7 +447,7 @@ class TurnerL32SlurmTests(unittest.TestCase):
         self.assertIn("TURNER_LENGTH", text)
         self.assertRegex(text, r"28\|30\|32")
         self.assertIn("OPENBLAS_NUM_THREADS=\"$SLURM_CPUS_PER_TASK\"", text)
-        self.assertIn("--declared-memory 512G", text.replace("\n", " "))
+        self.assertNotIn("--declared-memory", text)
 
     def test_documented_submission_is_test_only(self):
         text = (REPO / "tracks" / "ed" / "README.md").read_text()

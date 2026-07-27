@@ -1,0 +1,43 @@
+{
+  "schema_version": "turner2018-wheelhouse-v1",
+  "python": "3.12",
+  "platform": "manylinux_2_28_x86_64",
+  "implementation": "cp",
+  "abi": "cp312",
+  "lock_sha256": "91e98dd2ff1fdfc5f8892ea1a7d3c0409b250580aa4d0625d818b747fedd6887",
+  "packages": [
+    {
+      "name": "h5py",
+      "version": "3.16.0",
+      "filename": "h5py-3.16.0-cp312-cp312-manylinux_2_28_x86_64.whl",
+      "sha256": "dfc21898ff025f1e8e67e194965a95a8d4754f452f83454538f98f8a3fcb207e",
+      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/9e/e9/1a19e42cd43cc1365e127db6aae85e1c671da1d9a5d746f4d34a50edb577/h5py-3.16.0-cp312-cp312-manylinux_2_28_x86_64.whl",
+      "tags": ["cp312", "cp312", "manylinux_2_28_x86_64"]
+    },
+    {
+      "name": "numpy",
+      "version": "2.4.6",
+      "filename": "numpy-2.4.6-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "90f9849678c75fe7afa2d348ac842c168b0a4d3d61919687216dfc547976d853",
+      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/99/60/14115e6364fa676c5397c2ad3004e527e9aa487abf5d0706ec81bbd08529/numpy-2.4.6-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "tags": ["cp312", "cp312", "manylinux_2_27_x86_64.manylinux_2_28_x86_64"]
+    },
+    {
+      "name": "scipy",
+      "version": "1.18.0",
+      "filename": "scipy-1.18.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "1f55797419e16e7f30cf88ffb3113ce0467f00cfe3f70d5c281730b21769bfc2",
+      "url": "https://pypi.tuna.tsinghua.edu.cn/packages/dd/aa/1b939f6c67ed68635bb538e6752d3dacc02f66535182e939a89581a44e9c/scipy-1.18.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "tags": ["cp312", "cp312", "manylinux_2_27_x86_64.manylinux_2_28_x86_64"]
+    }
+  ],
+  "smoke_import": {
+    "command": "import numpy, scipy, h5py",
+    "expected_versions": {
+      "numpy": "2.4.6",
+      "scipy": "1.18.0",
+      "h5py": "3.16.0"
+    },
+    "installer": "pip --no-index --find-links"
+  }
+}

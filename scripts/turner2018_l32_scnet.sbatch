@@ -40,13 +40,13 @@ args=(
   --length "$TURNER_LENGTH"
   --stage all
   --output-dir "$TURNER_OUTPUT_DIR"
-  --declared-memory 512G
   --chunk-columns 32
 )
 
 if [[ -n "$TURNER_OFFLINE_IMAGE" ]]; then
   exec apptainer exec --cleanenv \
     --env "OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK,OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK,MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK" \
+    --env "SLURM_MEM_PER_NODE=${SLURM_MEM_PER_NODE:-},SLURM_MEM_PER_CPU=${SLURM_MEM_PER_CPU:-},SLURM_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK,SLURM_CPUS_ON_NODE=${SLURM_CPUS_ON_NODE:-}" \
     --bind "$TURNER_REPO:$TURNER_REPO" \
     --bind "$TURNER_OUTPUT_DIR:$TURNER_OUTPUT_DIR" \
     "$TURNER_OFFLINE_IMAGE" python -u "${args[@]}"

@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any
+import uuid
 
 import h5py
 import numpy as np
@@ -27,6 +28,15 @@ STAGE_ARTIFACT_NAMES = {
     "diagonalize": "eigensystem.h5",
     "observables": "observables.h5",
     "validate": "validation/metrics.json",
+}
+STAGE_INPUT_NAMES = {
+    "plan": set(),
+    "basis": set(),
+    "hamiltonian": {"basis"},
+    "eigensystem": {"hamiltonian"},
+    "diagonalize": {"hamiltonian"},
+    "observables": {"basis", "hamiltonian", "diagonalize"},
+    "validate": {"basis", "hamiltonian", "diagonalize", "observables"},
 }
 
 
@@ -113,11 +123,21 @@ def _write_stage_manifest(
     stage: str,
     artifact: ArtifactMeta,
     extra: dict[str, Any] | None = None,
+    inputs: dict[str, str] | None = None,
+    plan_sha256: str | None = None,
 ) -> dict[str, Any]:
+    declared_inputs = (
+        {name: "0" * 64 for name in STAGE_INPUT_NAMES[stage]}
+        if inputs is None
+        else dict(inputs)
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
+        "generation_id": str(uuid.uuid4()),
         "stage": stage,
         "status": "complete",
+        "inputs": declared_inputs,
+        "plan_sha256": plan_sha256 or "0" * 64,
         "artifact": {
             "path": artifact.path,
             "sha256": artifact.sha256,
@@ -176,49 +196,45 @@ def _atomic_write_npz(path: Path, writer: Any) -> None:
         raise
 
 
-def _load_previous_stage_state(
+def _backup_previous_stage_state(
     output_dir: Path,
     stage: str,
     artifact_path: Path,
-) -> tuple[bytes | None, bytes | None]:
+) -> bool:
     manifest_path = output_dir / "stages" / f"{stage}.json"
-    if not manifest_path.is_file() or not artifact_path.is_file():
-        return None, None
-
-    try:
-        payload = validate_stage(output_dir, stage)
-    except RuntimeError:
-        return None, None
-
-    manifest_artifact = payload.get("artifact", {}).get("path")
-    if manifest_artifact != artifact_path.name:
-        return None, None
-    return artifact_path.read_bytes(), manifest_path.read_bytes()
+    if not manifest_path.is_file() and not artifact_path.is_file():
+        return False
+    artifact_backup = artifact_path.with_name(artifact_path.name + ".backup")
+    manifest_backup = manifest_path.with_name(manifest_path.name + ".backup")
+    _cleanup_temp(artifact_backup)
+    _cleanup_temp(manifest_backup)
+    if artifact_path.is_file():
+        os.link(artifact_path, artifact_backup)
+        _fsync_parent_directory(artifact_backup)
+    if manifest_path.is_file():
+        os.link(manifest_path, manifest_backup)
+        _fsync_parent_directory(manifest_backup)
+    return True
 
 
 def _restore_stage_state(
     *,
     artifact_path: Path,
     manifest_path: Path,
-    old_artifact_bytes: bytes,
-    old_manifest_bytes: bytes,
 ) -> None:
     artifact_backup = artifact_path.with_name(artifact_path.name + ".backup")
     manifest_backup = manifest_path.with_name(manifest_path.name + ".backup")
     try:
-        with artifact_backup.open("wb") as handle:
-            handle.write(old_artifact_bytes)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(artifact_backup, artifact_path)
-        _fsync_parent_directory(artifact_path)
-
-        with manifest_backup.open("wb") as handle:
-            handle.write(old_manifest_bytes)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(manifest_backup, manifest_path)
-        _fsync_parent_directory(manifest_path)
+        for backup, target in (
+            (artifact_backup, artifact_path),
+            (manifest_backup, manifest_path),
+        ):
+            if backup.is_file():
+                _unlink_if_exists_durable(target)
+                os.link(backup, target)
+                _fsync_parent_directory(target)
+            else:
+                _unlink_if_exists_durable(target)
     finally:
         _cleanup_temp(artifact_backup)
         _cleanup_temp(manifest_backup)
@@ -234,23 +250,29 @@ def _publish_stage_transactional(
     write_artifact: Any,
     build_artifact: Any,
     extra: dict[str, Any] | None = None,
+    inputs: dict[str, str] | None = None,
+    plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     manifest_path = output_dir / "stages" / f"{stage}.json"
-    old_artifact_bytes, old_manifest_bytes = _load_previous_stage_state(
+    had_previous = _backup_previous_stage_state(
         output_dir, stage, artifact_path
     )
-
-    write_artifact()
-    artifact = build_artifact()
     try:
-        return _write_stage_manifest(output_dir, stage, artifact, extra)
+        write_artifact()
+        artifact = build_artifact()
+        return _write_stage_manifest(
+            output_dir,
+            stage,
+            artifact,
+            extra,
+            inputs=inputs,
+            plan_sha256=plan_sha256,
+        )
     except Exception:
-        if old_artifact_bytes is not None and old_manifest_bytes is not None:
+        if had_previous:
             _restore_stage_state(
                 artifact_path=artifact_path,
                 manifest_path=manifest_path,
-                old_artifact_bytes=old_artifact_bytes,
-                old_manifest_bytes=old_manifest_bytes,
             )
         else:
             _remove_path_durable(artifact_path)
@@ -270,6 +292,8 @@ def write_basis_artifact(
     representatives: np.ndarray | None = None,
     orbit_sizes: np.ndarray | None = None,
     length: int | None = None,
+    inputs: dict[str, str] | None = None,
+    plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     output_dir = Path(output_dir)
     target = output_dir / "basis.npz"
@@ -317,10 +341,18 @@ def write_basis_artifact(
         artifact_path=target,
         write_artifact=write_artifact,
         build_artifact=build_artifact,
+        inputs=inputs,
+        plan_sha256=plan_sha256,
     )
 
 
-def write_hamiltonian_artifact(output_dir: Path, *, hamiltonian: sp.csr_matrix) -> dict[str, Any]:
+def write_hamiltonian_artifact(
+    output_dir: Path,
+    *,
+    hamiltonian: sp.csr_matrix,
+    inputs: dict[str, str] | None = None,
+    plan_sha256: str | None = None,
+) -> dict[str, Any]:
     output_dir = Path(output_dir)
     target = output_dir / "hamiltonian.csr.npz"
 
@@ -343,6 +375,8 @@ def write_hamiltonian_artifact(output_dir: Path, *, hamiltonian: sp.csr_matrix) 
         write_artifact=write_artifact,
         build_artifact=build_artifact,
         extra={"nnz": int(hamiltonian.nnz)},
+        inputs=inputs,
+        plan_sha256=plan_sha256,
     )
 
 
@@ -352,6 +386,8 @@ def write_eigensystem(
     energies: np.ndarray,
     vectors: np.ndarray | None,
     stage: str = "eigensystem",
+    inputs: dict[str, str] | None = None,
+    plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     output_dir = Path(output_dir)
     target = output_dir / "eigensystem.h5"
@@ -391,10 +427,19 @@ def write_eigensystem(
         write_artifact=write_artifact,
         build_artifact=build_artifact,
         extra=extra,
+        inputs=inputs,
+        plan_sha256=plan_sha256,
     )
 
 
-def write_observables(output_dir: Path, observables: dict[str, np.ndarray]) -> dict[str, Any]:
+def write_observables(
+    output_dir: Path,
+    observables: dict[str, np.ndarray],
+    *,
+    metadata: dict[str, Any] | None = None,
+    inputs: dict[str, str] | None = None,
+    plan_sha256: str | None = None,
+) -> dict[str, Any]:
     output_dir = Path(output_dir)
     target = output_dir / "observables.h5"
     arrays = {name: np.asarray(value, dtype=np.float64) for name, value in observables.items()}
@@ -402,6 +447,7 @@ def write_observables(output_dir: Path, observables: dict[str, np.ndarray]) -> d
     def writer(handle: h5py.File) -> None:
         handle.attrs["schema_version"] = SCHEMA_VERSION
         group = handle.create_group("observables")
+        group.attrs["validation_metadata"] = json.dumps(metadata or {}, sort_keys=True)
         for name, array in arrays.items():
             group.create_dataset(name, data=array)
 
@@ -424,6 +470,8 @@ def write_observables(output_dir: Path, observables: dict[str, np.ndarray]) -> d
         write_artifact=write_artifact,
         build_artifact=build_artifact,
         extra={"datasets": sorted(arrays.keys())},
+        inputs=inputs,
+        plan_sha256=plan_sha256,
     )
 
 
@@ -450,6 +498,137 @@ def _resolve_stage_artifact_path(output_dir: Path, stage: str, artifact_path_raw
     return artifact_path
 
 
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_internal_artifact(
+    stage: str,
+    artifact_path: Path,
+    artifact: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    expected_conventions = {
+        "basis": ["sorted-constrained-states", "direct-dihedral-orbit-metadata"],
+        "hamiltonian": ["csr-real-symmetric"],
+        "eigensystem": ["eigenvectors-are-columns", "float64", "hdf5"],
+        "diagonalize": ["eigenvectors-are-columns", "float64", "hdf5"],
+        "observables": ["observables-only", "separate-from-eigensystem"],
+        "plan": ["atomic-json", "sha256-validated"],
+        "validate": ["atomic-json", "sha256-validated"],
+    }
+    if artifact.get("conventions") != expected_conventions.get(stage):
+        raise RuntimeError(f"invalid artifact conventions for stage={stage}")
+
+    if stage == "basis":
+        with np.load(artifact_path, allow_pickle=False) as data:
+            required = {"basis", "representatives", "orbit_sizes", "length"}
+            if set(data.files) != required:
+                raise RuntimeError("basis artifact has invalid NPZ structure")
+            basis = data["basis"]
+            representatives = data["representatives"]
+            orbit_sizes = data["orbit_sizes"]
+            if basis.dtype != np.uint64 or representatives.dtype != np.uint64:
+                raise RuntimeError("basis artifact arrays must be uint64")
+            if orbit_sizes.dtype != np.uint8 or representatives.shape != orbit_sizes.shape:
+                raise RuntimeError("basis orbit metadata is invalid")
+            if (
+                data["length"].shape != ()
+                or not np.all(basis[1:] > basis[:-1])
+                or not np.all(representatives[1:] > representatives[:-1])
+            ):
+                raise RuntimeError("basis artifact ordering or length metadata is invalid")
+            actual_shape = [int(basis.size)]
+            actual_dtype = "uint64"
+    elif stage == "hamiltonian":
+        matrix = sp.load_npz(artifact_path)
+        if not sp.isspmatrix_csr(matrix) or matrix.shape[0] != matrix.shape[1]:
+            raise RuntimeError("Hamiltonian artifact must be square CSR")
+        if matrix.dtype != np.float64 or not np.all(np.isfinite(matrix.data)):
+            raise RuntimeError("Hamiltonian artifact must be finite float64")
+        asymmetry = matrix - matrix.T
+        if asymmetry.nnz and float(np.max(np.abs(asymmetry.data))) > 1e-13:
+            raise RuntimeError("Hamiltonian artifact must be symmetric")
+        actual_shape = [int(matrix.shape[0]), int(matrix.shape[1])]
+        actual_dtype = "float64"
+    elif stage in {"eigensystem", "diagonalize"}:
+        with h5py.File(artifact_path, "r") as handle:
+            if handle.attrs.get("schema_version") != SCHEMA_VERSION:
+                raise RuntimeError("eigensystem HDF5 schema version mismatch")
+            if "eigensystem/energies" not in handle:
+                raise RuntimeError("eigensystem artifact is missing energies")
+            energies = handle["eigensystem/energies"]
+            dimension = int(energies.shape[0]) if energies.ndim == 1 else -1
+            if energies.dtype != np.float64 or dimension < 1:
+                raise RuntimeError("eigensystem energies metadata is invalid")
+            energy_values = energies[()]
+            if (
+                not np.all(np.isfinite(energy_values))
+                or np.any(np.diff(energy_values) < 0)
+            ):
+                raise RuntimeError("eigensystem energies must be finite and sorted")
+            if payload.get("has_vectors"):
+                if "eigensystem/vectors" not in handle:
+                    raise RuntimeError("eigensystem artifact is missing vectors")
+                vectors = handle["eigensystem/vectors"]
+                if (
+                    vectors.shape != (dimension, dimension)
+                    or vectors.dtype != np.float64
+                    or vectors.chunks != (dimension, 1)
+                ):
+                    raise RuntimeError("eigensystem vectors metadata is invalid")
+            actual_shape = [dimension]
+            actual_dtype = "float64"
+    elif stage == "observables":
+        with h5py.File(artifact_path, "r") as handle:
+            if handle.attrs.get("schema_version") != SCHEMA_VERSION:
+                raise RuntimeError("observables HDF5 schema version mismatch")
+            if "observables" not in handle:
+                raise RuntimeError("observables group is missing")
+            group = handle["observables"]
+            datasets = sorted(group.keys())
+            if datasets != payload.get("datasets"):
+                raise RuntimeError("observables dataset manifest mismatch")
+            total = 0
+            for name in datasets:
+                dataset = group[name]
+                if dataset.dtype != np.float64:
+                    raise RuntimeError("observables datasets must be float64")
+                if dataset.ndim == 0:
+                    finite = bool(np.isfinite(dataset[()]))
+                else:
+                    finite = all(
+                        bool(np.all(np.isfinite(dataset[start : start + 256])))
+                        for start in range(0, dataset.shape[0], 256)
+                    )
+                if not finite:
+                    raise RuntimeError("observables datasets must be finite")
+                total += int(dataset.size)
+            actual_shape = [total]
+            actual_dtype = "float64"
+    elif stage in {"plan", "validate"}:
+        document = json.loads(artifact_path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise RuntimeError(f"{stage} artifact must be a JSON object")
+        if stage == "validate" and (
+            document.get("status") != "passed" or document.get("passed") is not True
+        ):
+            raise RuntimeError("validate artifact does not record a passing gate")
+        actual_shape = []
+        actual_dtype = "json"
+    else:
+        raise RuntimeError(f"unsupported stage validation: {stage}")
+
+    if artifact.get("shape") != actual_shape:
+        raise RuntimeError(f"artifact shape metadata mismatch for stage={stage}")
+    if artifact.get("dtype") != actual_dtype:
+        raise RuntimeError(f"artifact dtype metadata mismatch for stage={stage}")
+
+
 def validate_stage(output_dir: Path, stage: str) -> dict[str, Any]:
     output_dir = Path(output_dir)
     path = output_dir / "stages" / f"{stage}.json"
@@ -457,8 +636,24 @@ def validate_stage(output_dir: Path, stage: str) -> dict[str, Any]:
         raise RuntimeError(f"missing stage manifest: {path}")
 
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise RuntimeError(f"stage manifest schema version mismatch: {path}")
     if payload.get("stage") != stage or payload.get("status") != "complete":
         raise RuntimeError(f"stage manifest is incomplete: {path}")
+    try:
+        uuid.UUID(payload.get("generation_id", ""))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise RuntimeError(f"stage manifest generation id is invalid: {path}") from error
+    if not _is_sha256(payload.get("plan_sha256")):
+        raise RuntimeError(f"stage manifest plan hash is invalid: {path}")
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, dict) or any(
+        not isinstance(name, str) or not _is_sha256(value)
+        for name, value in inputs.items()
+    ):
+        raise RuntimeError(f"stage manifest input hashes are invalid: {path}")
+    if set(inputs) != STAGE_INPUT_NAMES.get(stage):
+        raise RuntimeError(f"stage manifest input names are invalid: {path}")
 
     artifact = payload.get("artifact")
     if not isinstance(artifact, dict):
@@ -476,4 +671,5 @@ def validate_stage(output_dir: Path, stage: str) -> dict[str, Any]:
         raise RuntimeError(
             f"artifact sha256 mismatch for stage={stage}: expected={expected_sha} actual={actual_sha}"
         )
+    _validate_internal_artifact(stage, artifact_path, artifact, payload)
     return payload

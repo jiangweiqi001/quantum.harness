@@ -1,0 +1,50 @@
+import json
+from pathlib import Path
+import shutil
+import tomllib
+
+import pytest
+
+from turner2018_wheelhouse import load_manifest, verify_lock, verify_wheelhouse
+
+
+REPO = Path(__file__).resolve().parents[2]
+MANIFEST = REPO / "scripts" / "turner2018_wheelhouse_manifest.json"
+
+
+def test_wheel_manifest_matches_uv_lock_versions_and_hashes():
+    manifest = load_manifest(MANIFEST)
+    lock = tomllib.loads((REPO / "uv.lock").read_text())
+    locked = {
+        package["name"]: package
+        for package in lock["package"]
+        if package["name"] in {"numpy", "scipy", "h5py"}
+    }
+    assert verify_lock(REPO / "uv.lock", manifest) == []
+    for package in manifest["packages"]:
+        entry = locked[package["name"]]
+        assert package["version"] == entry["version"]
+        wheel = next(
+            wheel
+            for wheel in entry["wheels"]
+            if wheel["url"].endswith(package["filename"])
+        )
+        assert wheel["hash"] == f"sha256:{package['sha256']}"
+
+
+def test_wheelhouse_verifier_rejects_missing_and_mutated_wheels(tmp_path):
+    manifest = load_manifest(MANIFEST)
+    errors = verify_wheelhouse(tmp_path, manifest)
+    assert errors and all("missing" in error for error in errors)
+
+    source = REPO / ".external" / "task6-wheelhouse-cp312-manylinux-x86_64"
+    if not source.is_dir():
+        pytest.skip("local wheelhouse is unavailable")
+    for package in manifest["packages"]:
+        shutil.copy2(source / package["filename"], tmp_path / package["filename"])
+    assert verify_wheelhouse(tmp_path, manifest) == []
+
+    target = tmp_path / manifest["packages"][0]["filename"]
+    target.write_bytes(target.read_bytes() + b"mutation")
+    errors = verify_wheelhouse(tmp_path, manifest)
+    assert any("sha256 mismatch" in error for error in errors)

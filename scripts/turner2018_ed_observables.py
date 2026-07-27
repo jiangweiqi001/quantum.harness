@@ -14,6 +14,7 @@ from turner2018_ed_validation import (
     ORTHOGONALITY_PAIR_MEMORY_POLICY,
     ORTHOGONALITY_SAMPLING_POLICY,
     positive_integer,
+    sample_pair_batches,
     uint64_state,
     validate_eigenpair_residuals,
     validate_hermitian,
@@ -601,5 +602,123 @@ def compute_observables(
             "max_sample_overlap": validation["max_sample_overlap"],
             "max_hermiticity_error": hermiticity_error,
             "max_eigenpair_residual": residual_error,
+        },
+    }
+
+
+def compute_observables_from_h5(
+    basis: OrbitBasis,
+    reduced_hamiltonian: sp.csr_matrix,
+    energies: np.ndarray,
+    vectors: object,
+    *,
+    chunk_size: int = 262144,
+    chunk_columns: int = 256,
+    orthogonality_samples: int = 4096,
+) -> dict[str, object]:
+    """Compute and validate observables while reading HDF5 vectors by columns."""
+    chunk_size = _validate_chunk_size(chunk_size)
+    chunk_columns = positive_integer(chunk_columns, "chunk_columns")
+    orthogonality_samples = positive_integer(
+        orthogonality_samples, "orthogonality_samples"
+    )
+    dimension = len(basis.representatives)
+    energy_array = np.asarray(energies, dtype=np.float64)
+    if energy_array.shape != (dimension,) or not np.all(np.isfinite(energy_array)):
+        raise ValueError("energies must be finite and match the basis")
+    if np.any(np.diff(energy_array) < 0):
+        raise ValueError("energies must be sorted")
+    if getattr(vectors, "shape", None) != (dimension, dimension):
+        raise ValueError("eigenvector dataset shape must match the basis")
+
+    hermiticity_error = validate_hermitian(
+        reduced_hamiltonian,
+        chunk_columns=chunk_columns,
+        tolerance=1e-10,
+    )
+    initial_state = density_wave_state(basis.length, 2)
+    z2_sector = project_product_state(basis, initial_state, chunk_size=chunk_size)
+    streamed_fsa = stream_fsa_shells(
+        basis,
+        initial_state,
+        reduced_hamiltonian=reduced_hamiltonian,
+        chunk_size=chunk_size,
+    )
+
+    overlap_z2 = np.empty(dimension, dtype=np.float64)
+    participation_ratio = np.empty(dimension, dtype=np.float64)
+    exact_shell_amplitudes = np.empty(
+        (streamed_fsa.projected_shells.shape[0], dimension),
+        dtype=np.float64,
+    )
+    max_norm_error = 0.0
+    max_residual = 0.0
+    for start in range(0, dimension, chunk_columns):
+        stop = min(start + chunk_columns, dimension)
+        block = np.asarray(vectors[:, start:stop], dtype=np.float64)
+        if not np.all(np.isfinite(block)):
+            raise ValueError("eigenvectors must be finite")
+        norms = np.sum(block * block, axis=0)
+        max_norm_error = max(max_norm_error, float(np.max(np.abs(norms - 1.0))))
+        residual = (
+            reduced_hamiltonian @ block
+            - block * energy_array[np.newaxis, start:stop]
+        )
+        max_residual = max(max_residual, float(np.max(np.abs(residual))))
+        overlap_z2[start:stop] = np.abs(block.T @ z2_sector) ** 2
+        participation_ratio[start:stop] = np.sum(block**4, axis=0)
+        exact_shell_amplitudes[:, start:stop] = (
+            streamed_fsa.projected_shells @ block
+        )
+    if max_norm_error > 1e-10:
+        raise ValueError("eigenvector norms exceed tolerance")
+    if max_residual > 1e-10:
+        raise ValueError("eigenpair residual exceeds tolerance")
+
+    max_sample_overlap = 0.0
+    samples_checked = 0
+    for left, right in sample_pair_batches(
+        dimension,
+        sample_count=orthogonality_samples,
+        batch_size=chunk_columns,
+    ):
+        selected = np.unique(np.concatenate((left, right)))
+        block = np.asarray(vectors[:, selected], dtype=np.float64)
+        positions = {int(column): index for index, column in enumerate(selected)}
+        overlaps = np.sum(
+            block[:, [positions[int(column)] for column in left]]
+            * block[:, [positions[int(column)] for column in right]],
+            axis=0,
+        )
+        samples_checked += int(left.size)
+        if overlaps.size:
+            max_sample_overlap = max(
+                max_sample_overlap,
+                float(np.max(np.abs(overlaps))),
+            )
+    if max_sample_overlap > 1e-10:
+        raise ValueError("eigenvector orthogonality exceeds tolerance")
+
+    return {
+        "overlap_z2": overlap_z2,
+        "participation_ratio": participation_ratio,
+        "exact_shell_amplitudes": exact_shell_amplitudes,
+        "fsa_shell_vectors_sector": streamed_fsa.projected_shells,
+        "fsa_hamiltonian_sector": streamed_fsa.reduced_fsa_hamiltonian,
+        "fsa_beta_full_chain": streamed_fsa.beta,
+        "validation_metadata": {
+            "chunk_columns": min(chunk_columns, dimension),
+            "finite_columns_checked": dimension,
+            "norm_columns_checked": dimension,
+            "residual_columns_checked": dimension,
+            "orthogonality_sample_count": samples_checked,
+            "orthogonality_sampling_policy": ORTHOGONALITY_SAMPLING_POLICY,
+            "orthogonality_pair_batch_size": min(chunk_columns, samples_checked),
+            "orthogonality_pair_metadata_memory": ORTHOGONALITY_PAIR_MEMORY_POLICY,
+            "max_norm_error": max_norm_error,
+            "max_sample_overlap": max_sample_overlap,
+            "max_hermiticity_error": hermiticity_error,
+            "max_eigenpair_residual": max_residual,
+            "eigenvector_access": "column-chunked",
         },
     }

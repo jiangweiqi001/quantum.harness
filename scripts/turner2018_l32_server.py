@@ -13,8 +13,10 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable
+import uuid
 
 from turner2018_ed_artifacts import (
+    SCHEMA_VERSION as ARTIFACT_SCHEMA_VERSION,
     validate_stage,
     write_basis_artifact,
     write_eigensystem,
@@ -26,14 +28,14 @@ from turner2018_ed_engine import (
     assemble_reduced_hamiltonian,
     build_orbit_basis,
 )
-from turner2018_ed_observables import compute_observables
+from turner2018_ed_observables import compute_observables, compute_observables_from_h5
 from turner2018_ed_solver import estimate_dense_resources, solve_full_eigensystem
 
 L32_FULL_DIMENSION = 4_870_847
 L32_SECTOR_DIMENSION = 77_436
 FULL_FSA_SHELLS = 33
 SYMMETRY_FOLDED_FSA_SHELLS = 17
-SCHEMA_VERSION = "turner-l32-ed-fsa-v1"
+SCHEMA_VERSION = ARTIFACT_SCHEMA_VERSION
 LOCAL_EQUIVALENCE_SCHEMA_VERSION = "turner-local-equivalence-v1"
 QUANTUM_MODEL = "H=sum_j P_(j-1) X_j P_(j+1), PBC"
 STAGES = (
@@ -54,6 +56,12 @@ LOCAL_VALIDATION_DIMENSIONS = {
     18: (5778, 209),
     20: (15127, 455),
 }
+PRODUCTION_DIMENSIONS = {
+    10: (123, 14),
+    28: (710_647, 13_201),
+    30: (1_860_498, 31_836),
+    32: (4_870_847, 77_436),
+}
 LOCAL_VALIDATION_LENGTHS = tuple(LOCAL_VALIDATION_DIMENSIONS)
 LOCAL_VALIDATION_TOLERANCES = {
     "reduced_matrix": 1e-11,
@@ -65,12 +73,14 @@ LOCAL_VALIDATION_TOLERANCES = {
     "fsa_projected_shell": 1e-11,
     "pr2_isolated": 1e-10,
 }
-STAGE_PREDECESSOR = {
-    "hamiltonian": "basis",
-    "diagonalize": "hamiltonian",
-    "observables": "diagonalize",
-    "validate": "observables",
-    "figures": "validate",
+STAGE_DEPENDENCIES = {
+    "plan": (),
+    "basis": (),
+    "hamiltonian": ("basis",),
+    "diagonalize": ("hamiltonian",),
+    "observables": ("basis", "hamiltonian", "diagonalize"),
+    "validate": ("basis", "hamiltonian", "diagonalize", "observables"),
+    "figures": ("validate",),
 }
 COMPUTATIONAL_STAGES = (
     "basis",
@@ -80,6 +90,10 @@ COMPUTATIONAL_STAGES = (
     "validate",
 )
 FIGURES_ADAPTER: Callable[[Path, int], Path] | None = None
+
+
+class StaleStageError(RuntimeError):
+    """A structurally valid stage no longer matches its dependencies."""
 
 
 def dense_resource_estimate(dimension: int) -> dict[str, int | float]:
@@ -112,7 +126,7 @@ def require_stage(output_dir: str | Path, stage: str) -> dict[str, Any]:
     if not path.is_file():
         raise RuntimeError(f"required stage {stage!r} is not complete: missing {path}")
     try:
-        return validate_stage(Path(output_dir), stage)
+        return _validate_current_stage(Path(output_dir), stage)
     except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as error:
         raise RuntimeError(
             f"required stage {stage!r} is not complete or valid: {error}"
@@ -122,6 +136,41 @@ def require_stage(output_dir: str | Path, stage: str) -> dict[str, Any]:
 def _sha256(path: Path) -> str:
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _stage_manifest_sha256(output_dir: Path, stage: str) -> str:
+    return _sha256(output_dir / "stages" / f"{stage}.json")
+
+
+def _plan_config_sha256(output_dir: Path) -> str:
+    plan = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    value = plan.get("scientific_config_sha256")
+    if not isinstance(value, str):
+        raise RuntimeError("plan is missing scientific_config_sha256")
+    return value
+
+
+def _stage_inputs(output_dir: Path, stage: str) -> dict[str, str]:
+    return {
+        dependency: _stage_manifest_sha256(output_dir, dependency)
+        for dependency in STAGE_DEPENDENCIES[stage]
+    }
+
+
+def _validate_current_stage(output_dir: Path, stage: str) -> dict[str, Any]:
+    payload = validate_stage(output_dir, stage)
+    for dependency in STAGE_DEPENDENCIES[stage]:
+        _validate_current_stage(output_dir, dependency)
+    expected_inputs = _stage_inputs(output_dir, stage)
+    if payload.get("inputs") != expected_inputs:
+        raise StaleStageError(
+            f"stage={stage} input hashes are stale: "
+            f"recorded={payload.get('inputs')} current={expected_inputs}"
+        )
+    expected_plan = _plan_config_sha256(output_dir)
+    if payload.get("plan_sha256") != expected_plan:
+        raise StaleStageError(f"stage={stage} scientific plan hash is stale")
+    return payload
 
 
 def _git_revision() -> str:
@@ -184,23 +233,34 @@ def resolve_declared_memory_bytes(
     explicit: str | None = None,
 ) -> int:
     """Resolve total declared memory from CLI or standard Slurm variables."""
-    if explicit is not None:
-        return parse_memory_bytes(explicit)
+    explicit_bytes = None if explicit is None else parse_memory_bytes(explicit)
+    scheduler_bytes: int | None = None
     per_node = environment.get("SLURM_MEM_PER_NODE")
     if per_node:
-        return parse_memory_bytes(per_node)
-    per_cpu = environment.get("SLURM_MEM_PER_CPU")
-    if per_cpu:
-        cpus = environment.get("SLURM_CPUS_ON_NODE")
-        if cpus is None:
-            cpus_per_task = int(environment.get("SLURM_CPUS_PER_TASK", "1"))
-            tasks = int(environment.get("SLURM_NTASKS", "1"))
-            cpu_count = cpus_per_task * tasks
-        else:
-            cpu_count = int(cpus)
+        scheduler_bytes = parse_memory_bytes(per_node)
+    elif environment.get("SLURM_MEM_PER_CPU"):
+        per_cpu = parse_memory_bytes(environment["SLURM_MEM_PER_CPU"])
+        raw_cpus = environment.get("SLURM_CPUS_PER_TASK") or environment.get(
+            "SLURM_CPUS_ON_NODE"
+        )
+        if raw_cpus is None:
+            raise RuntimeError(
+                "SLURM_MEM_PER_CPU requires SLURM_CPUS_PER_TASK "
+                "or SLURM_CPUS_ON_NODE"
+            )
+        try:
+            cpu_count = int(raw_cpus)
+        except ValueError as error:
+            raise ValueError(f"invalid declared Slurm CPU count: {raw_cpus!r}") from error
         if cpu_count < 1:
             raise ValueError("declared Slurm CPU count must be positive")
-        return parse_memory_bytes(per_cpu) * cpu_count
+        scheduler_bytes = per_cpu * cpu_count
+    if scheduler_bytes is not None and explicit_bytes is not None:
+        return min(scheduler_bytes, explicit_bytes)
+    if scheduler_bytes is not None:
+        return scheduler_bytes
+    if explicit_bytes is not None:
+        return explicit_bytes
     raise RuntimeError(
         "dense diagonalization requires --declared-memory or "
         "SLURM_MEM_PER_NODE/SLURM_MEM_PER_CPU"
@@ -298,7 +358,7 @@ def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]
                 "minimum_requested_bytes": task3_estimate.minimum_requested_bytes,
             }
         )
-    return {
+    plan = {
         "schema_version": SCHEMA_VERSION,
         "status": "planned",
         "readiness": "ready",
@@ -351,6 +411,19 @@ def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]
             "git_revision": _git_revision(),
         },
     }
+    scientific_config = {
+        key: plan[key]
+        for key in ("model", "basis", "fsa", "solver", "observables")
+    }
+    plan["scientific_config_sha256"] = hashlib.sha256(
+        json.dumps(
+            scientific_config,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return plan
 
 
 def _write_hashed_json_stage(
@@ -358,13 +431,19 @@ def _write_hashed_json_stage(
     stage: str,
     relative_path: str,
     payload: dict[str, Any],
+    *,
+    inputs: dict[str, str],
+    plan_sha256: str,
 ) -> dict[str, Any]:
     target = output_dir / relative_path
     atomic_write_json(target, payload)
     stage_payload = {
         "schema_version": SCHEMA_VERSION,
+        "generation_id": str(uuid.uuid4()),
         "stage": stage,
         "status": "complete",
+        "inputs": inputs,
+        "plan_sha256": plan_sha256,
         "artifact": {
             "path": relative_path,
             "sha256": _sha256(target),
@@ -383,7 +462,14 @@ def _write_hashed_json_stage(
 def write_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     plan = build_plan(length, output_dir, argv)
-    _write_hashed_json_stage(output_dir, "plan", "manifest.json", plan)
+    _write_hashed_json_stage(
+        output_dir,
+        "plan",
+        "manifest.json",
+        plan,
+        inputs={},
+        plan_sha256=plan["scientific_config_sha256"],
+    )
     return plan
 
 
@@ -406,6 +492,8 @@ def run_basis(length: int, output_dir: Path) -> None:
         representatives=basis.representatives,
         orbit_sizes=basis.orbit_sizes,
         length=length,
+        inputs=_stage_inputs(output_dir, "basis"),
+        plan_sha256=_plan_config_sha256(output_dir),
     )
 
 
@@ -432,6 +520,8 @@ def run_hamiltonian(length: int, output_dir: Path) -> None:
     write_hamiltonian_artifact(
         output_dir,
         hamiltonian=assemble_reduced_hamiltonian(basis),
+        inputs=_stage_inputs(output_dir, "hamiltonian"),
+        plan_sha256=_plan_config_sha256(output_dir),
     )
 
 
@@ -463,6 +553,8 @@ def run_diagonalize(
         energies=energies,
         vectors=vectors,
         stage="diagonalize",
+        inputs=_stage_inputs(output_dir, "diagonalize"),
+        plan_sha256=_plan_config_sha256(output_dir),
     )
 
 
@@ -476,40 +568,211 @@ def run_observables(length: int, output_dir: Path, chunk_columns: int) -> None:
     basis = _load_basis(output_dir / "basis.npz")
     matrix = sp.load_npz(output_dir / "hamiltonian.csr.npz").tocsr()
     with h5py.File(output_dir / "eigensystem.h5", "r") as handle:
-        energies = handle["eigensystem/energies"][:]
-        vectors = handle["eigensystem/vectors"][:]
-    result = compute_observables(
-        basis,
-        matrix,
-        energies,
-        vectors,
-        chunk_columns=chunk_columns,
-    )
+        energies = handle["eigensystem/energies"][()]
+        result = compute_observables_from_h5(
+            basis,
+            matrix,
+            energies,
+            handle["eigensystem/vectors"],
+            chunk_columns=chunk_columns,
+        )
     arrays = {
         name: value
         for name, value in result.items()
         if name not in {"energies", "eigenvectors", "validation_metadata"}
     }
-    write_observables(output_dir, arrays)
+    write_observables(
+        output_dir,
+        arrays,
+        metadata=result["validation_metadata"],
+        inputs=_stage_inputs(output_dir, "observables"),
+        plan_sha256=_plan_config_sha256(output_dir),
+    )
 
 
 def run_validate(length: int, output_dir: Path) -> None:
-    validated = {
-        stage: require_stage(output_dir, stage)["artifact"]["sha256"]
-        for stage in ("basis", "hamiltonian", "diagonalize", "observables")
-    }
+    import h5py
+    import numpy as np
+    import scipy.sparse as sp
+
+    validated = {}
+    for stage in ("basis", "hamiltonian", "diagonalize", "observables"):
+        validated[stage] = require_stage(output_dir, stage)["artifact"]["sha256"]
+    checks: dict[str, dict[str, Any]] = {}
+    try:
+        basis = _load_basis(output_dir / "basis.npz")
+        matrix = sp.load_npz(output_dir / "hamiltonian.csr.npz").tocsr()
+        expected_full, expected_sector = PRODUCTION_DIMENSIONS.get(
+            length,
+            (len(basis.constrained_states), len(basis.representatives)),
+        )
+        checks["basis_full_dimension"] = {
+            "value": len(basis.constrained_states),
+            "expected": expected_full,
+            "passed": len(basis.constrained_states) == expected_full,
+        }
+        checks["basis_sector_dimension"] = {
+            "value": len(basis.representatives),
+            "expected": expected_sector,
+            "passed": len(basis.representatives) == expected_sector,
+        }
+        matrix_values_finite = bool(np.all(np.isfinite(matrix.data)))
+        checks["hamiltonian_shape"] = {
+            "value": list(matrix.shape),
+            "expected": [expected_sector, expected_sector],
+            "passed": matrix.shape == (expected_sector, expected_sector),
+        }
+        checks["hamiltonian_finite"] = {
+            "value": matrix_values_finite,
+            "expected": True,
+            "passed": matrix_values_finite,
+        }
+
+        with h5py.File(output_dir / "eigensystem.h5", "r") as handle:
+            energies_dataset = handle["eigensystem/energies"]
+            vectors = handle["eigensystem/vectors"]
+            energies = energies_dataset[()]
+            checks["energies_finite"] = {
+                "value": bool(np.all(np.isfinite(energies))),
+                "expected": True,
+                "passed": bool(np.all(np.isfinite(energies))),
+            }
+            sorted_energies = bool(
+                energies.shape == (expected_sector,)
+                and np.all(np.diff(energies) >= 0)
+            )
+            checks["energies_sorted"] = {
+                "value": sorted_energies,
+                "expected_length": expected_sector,
+                "passed": sorted_energies,
+            }
+            vector_metadata_passed = (
+                vectors.shape == (expected_sector, expected_sector)
+                and vectors.dtype == np.float64
+                and vectors.chunks == (expected_sector, 1)
+            )
+            checks["eigenvector_metadata"] = {
+                "value": {
+                    "shape": list(vectors.shape),
+                    "dtype": str(vectors.dtype),
+                    "chunks": list(vectors.chunks or ()),
+                },
+                "expected": {
+                    "shape": [expected_sector, expected_sector],
+                    "dtype": "float64",
+                    "chunks": [expected_sector, 1],
+                },
+                "passed": vector_metadata_passed,
+            }
+            streamed = compute_observables_from_h5(
+                basis,
+                matrix,
+                energies,
+                vectors,
+                chunk_columns=32,
+            )
+
+        metadata = streamed["validation_metadata"]
+        checks["hamiltonian_hermiticity"] = _threshold_metric(
+            float(metadata["max_hermiticity_error"]), 1e-10
+        )
+        checks["eigenvector_norm"] = _threshold_metric(
+            float(metadata["max_norm_error"]), 1e-10
+        )
+        checks["eigenpair_residual"] = _threshold_metric(
+            float(metadata["max_eigenpair_residual"]), 1e-10
+        )
+        checks["eigenvector_orthogonality"] = _threshold_metric(
+            float(metadata["max_sample_overlap"]), 1e-10
+        )
+        overlap_sum_error = abs(float(np.sum(streamed["overlap_z2"])) - 0.5)
+        checks["z2_overlap_sum"] = _threshold_metric(overlap_sum_error, 1e-10)
+
+        expected_shapes = {
+            "overlap_z2": (expected_sector,),
+            "participation_ratio": (expected_sector,),
+            "exact_shell_amplitudes": (length // 2 + 1, expected_sector),
+            "fsa_shell_vectors_sector": (length // 2 + 1, expected_sector),
+            "fsa_hamiltonian_sector": (length // 2 + 1, length // 2 + 1),
+            "fsa_beta_full_chain": (length,),
+        }
+        observable_shapes_passed = True
+        observables_finite = True
+        max_observable_error = 0.0
+        persisted_overlap_sum = 0.0
+        with h5py.File(output_dir / "observables.h5", "r") as handle:
+            group = handle["observables"]
+            recorded_metadata = json.loads(group.attrs["validation_metadata"])
+            for name, expected_shape in expected_shapes.items():
+                dataset = group[name]
+                observable_shapes_passed &= dataset.shape == expected_shape
+                for start in range(0, dataset.shape[0], 32):
+                    block = dataset[start : start + 32]
+                    observables_finite &= bool(np.all(np.isfinite(block)))
+                    expected_block = np.asarray(streamed[name])[start : start + 32]
+                    max_observable_error = max(
+                        max_observable_error,
+                        float(np.max(np.abs(block - expected_block))),
+                    )
+                if name == "overlap_z2":
+                    persisted_overlap_sum = float(np.sum(dataset[()]))
+            metadata_passed = (
+                recorded_metadata.get("eigenvector_access") == "column-chunked"
+                and recorded_metadata.get("finite_columns_checked")
+                == expected_sector
+                and recorded_metadata.get("residual_columns_checked")
+                == expected_sector
+            )
+        checks["observables_shapes"] = {
+            "value": observable_shapes_passed,
+            "expected": True,
+            "passed": observable_shapes_passed,
+        }
+        checks["observables_finite"] = {
+            "value": observables_finite,
+            "expected": True,
+            "passed": observables_finite,
+        }
+        checks["observables_metadata"] = {
+            "value": metadata_passed,
+            "expected": True,
+            "passed": metadata_passed,
+        }
+        checks["observables_consistency"] = _threshold_metric(
+            max_observable_error,
+            1e-12,
+        )
+        checks["z2_overlap_sum"] = _threshold_metric(
+            abs(persisted_overlap_sum - 0.5),
+            1e-10,
+        )
+        passed = all(check["passed"] for check in checks.values())
+    except Exception as error:
+        checks["execution"] = {
+            "value": f"{type(error).__name__}: {error}",
+            "passed": False,
+        }
+        passed = False
+
     metrics = {
         "schema_version": SCHEMA_VERSION,
-        "status": "passed",
-        "passed": True,
+        "status": "passed" if passed else "failed",
+        "passed": passed,
         "length": length,
         "validated_stage_sha256": validated,
+        "metrics": checks,
+        "eigenvector_access": "column-chunked",
     }
+    if not passed:
+        atomic_write_json(output_dir / "validation" / "metrics.json", metrics)
+        raise RuntimeError("internal scientific validation failed")
     _write_hashed_json_stage(
         output_dir,
         "validate",
         "validation/metrics.json",
         metrics,
+        inputs=_stage_inputs(output_dir, "validate"),
+        plan_sha256=_plan_config_sha256(output_dir),
     )
 
 
@@ -822,6 +1085,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("tracks/ed/results/turner-2018/l32-server"),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--chunk-columns", type=int, default=32)
     parser.add_argument(
         "--declared-memory",
@@ -853,6 +1117,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         conflicting_options = {
             "--dry-run",
+            "--rebuild",
             "--length",
             "--chunk-columns",
             "--declared-memory",
@@ -911,13 +1176,16 @@ def main(argv: list[str] | None = None) -> int:
             continue
         try:
             stage_manifest = args.output_dir / "stages" / f"{stage}.json"
-            if stage_manifest.is_file():
-                validate_stage(args.output_dir, stage)
-                print(f"skipped stage={stage}", flush=True)
-                continue
-            predecessor = STAGE_PREDECESSOR.get(stage)
-            if predecessor is not None:
-                require_stage(args.output_dir, predecessor)
+            if stage_manifest.is_file() and not args.rebuild:
+                try:
+                    _validate_current_stage(args.output_dir, stage)
+                except StaleStageError:
+                    pass
+                else:
+                    print(f"skipped stage={stage}", flush=True)
+                    continue
+            for dependency in STAGE_DEPENDENCIES[stage]:
+                require_stage(args.output_dir, dependency)
             if stage == "basis":
                 run_basis(args.length, args.output_dir)
             elif stage == "hamiltonian":

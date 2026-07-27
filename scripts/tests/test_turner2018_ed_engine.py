@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
 import scipy.sparse as sp
+import ast
+import inspect
 
 from pxp_ed import (
     _reflect,
@@ -118,6 +120,33 @@ def test_reduced_hamiltonian_csr_layout_is_deterministic(length):
     assert first.data.tobytes() == second.data.tobytes()
     assert first.indices.tobytes() == second.indices.tobytes()
     assert first.indptr.tobytes() == second.indptr.tobytes()
+
+
+def test_reduced_hamiltonian_is_invariant_to_representative_chunks():
+    basis = build_orbit_basis(16)
+    baseline = assemble_reduced_hamiltonian(
+        basis,
+        representative_chunk_size=len(basis.representatives),
+    )
+    for chunk_size in (1, 7, 32):
+        candidate = assemble_reduced_hamiltonian(
+            basis,
+            representative_chunk_size=chunk_size,
+        )
+        assert candidate.data.tobytes() == baseline.data.tobytes()
+        assert candidate.indices.tobytes() == baseline.indices.tobytes()
+        assert candidate.indptr.tobytes() == baseline.indptr.tobytes()
+
+
+def test_reduced_hamiltonian_has_no_scalar_canonicalization_call():
+    tree = ast.parse(inspect.getsource(assemble_reduced_hamiltonian))
+    for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+        if isinstance(call.func, ast.Name) and call.func.id == "canonical_dihedral":
+            assert call.args
+            assert not any(
+                isinstance(node, ast.List) and len(node.elts) == 1
+                for node in ast.walk(call.args[0])
+            )
 
 
 @pytest.mark.parametrize("length", [10, 12, 14, 16, 18, 20])

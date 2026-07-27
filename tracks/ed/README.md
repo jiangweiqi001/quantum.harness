@@ -151,7 +151,10 @@ official ZIP/HDF5 files. No curves are digitized from the published image.
 The staged server driver uses the native independent engine and supports
 `--stage plan|basis|hamiltonian|diagonalize|observables|validate|figures|all`.
 Every completed stage is skipped only after its artifact SHA-256 is verified;
-missing predecessors and corrupt artifacts fail closed. `eigensystem.h5` and
+manifests also bind the exact predecessor-manifest hashes and scientific plan
+hash. A clean stale downstream stage is recomputed by `all`; corrupt artifacts
+and stale or corrupt inputs to direct stage invocations fail closed.
+`eigensystem.h5` and
 `observables.h5` remain separate, so observables never copy the dense
 eigenvector file. Task 6 `all` stops after `validate`; `figures` deliberately
 fails closed until the independent renderers from Tasks 7/8 are connected.
@@ -213,18 +216,12 @@ probe-confirmed `--gres` value to `scnet_args`; do not guess it. These commands
 are probes or test-only validation, not authorization for a real submission.
 
 The Task 6 offline wheelhouse is a local, gitignored staging artifact for
-CPython 3.12 on manylinux x86_64. It contains exactly NumPy 2.4.6, SciPy 1.18.0,
-and h5py 3.16.0. Verify and install it without an index:
+CPython 3.12 on manylinux x86_64. The tracked manifest records exact filenames,
+versions, platform tags, PyPI SHA-256 values, the lock hash, and the smoke-test
+schema. Prepare or re-verify the binaries with the tracked tool:
 
 ```bash
-WHEELHOUSE=.external/task6-wheelhouse-cp312-manylinux-x86_64
-(cd "$WHEELHOUSE" && sha256sum -c SHA256SUMS)
-python3.12 -m venv /tmp/turner-offline-proof
-/tmp/turner-offline-proof/bin/python -m pip install \
-  --no-index --find-links "$WHEELHOUSE" \
-  numpy==2.4.6 scipy==1.18.0 h5py==3.16.0
-/tmp/turner-offline-proof/bin/python -c \
-  "import numpy, scipy, h5py; print(numpy.__version__, scipy.__version__, h5py.__version__)"
+.venv/bin/python scripts/turner2018_wheelhouse.py --prepare --smoke
 ```
 
 ## References
