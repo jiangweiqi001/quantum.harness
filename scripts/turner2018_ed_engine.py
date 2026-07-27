@@ -174,9 +174,11 @@ def assemble_reduced_hamiltonian(basis: OrbitBasis) -> sp.csr_matrix:
     orbit_sizes = np.asarray(basis.orbit_sizes, dtype=np.float64)
     dimension = len(representatives)
 
-    rows: list[int] = []
-    columns: list[int] = []
-    values: list[float] = []
+    max_entries = dimension * length
+    rows = np.empty(max_entries, dtype=np.int64)
+    columns = np.empty(max_entries, dtype=np.int64)
+    values = np.empty(max_entries, dtype=np.float64)
+    cursor = 0
 
     for source_index, source_representative in enumerate(representatives):
         source_state = int(source_representative)
@@ -217,11 +219,15 @@ def assemble_reduced_hamiltonian(basis: OrbitBasis) -> sp.csr_matrix:
             multiplicity = destination_counts[int(destination_representative)]
             destination_orbit_size = orbit_sizes[destination_index]
             value = multiplicity * np.sqrt(source_orbit_size / destination_orbit_size)
-            rows.append(int(destination_index))
-            columns.append(source_index)
-            values.append(float(value))
+            rows[cursor] = int(destination_index)
+            columns[cursor] = source_index
+            values[cursor] = float(value)
+            cursor += 1
 
-    reduced = sp.coo_matrix((values, (rows, columns)), shape=(dimension, dimension))
+    reduced = sp.coo_matrix(
+        (values[:cursor], (rows[:cursor], columns[:cursor])),
+        shape=(dimension, dimension),
+    )
     reduced_csr = reduced.tocsr()
     reduced_csr.sum_duplicates()
     reduced_csr.eliminate_zeros()

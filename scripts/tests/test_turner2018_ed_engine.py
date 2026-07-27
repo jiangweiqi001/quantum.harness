@@ -132,13 +132,12 @@ def test_reduced_hamiltonian_dimensions_match_expected_sector_sizes(length):
     )
 
 
-@pytest.mark.parametrize("length", [10, 12, 14, 16, 18, 20])
-def test_reduced_hamiltonian_matvec_matches_reference_through_l20(length):
+@pytest.mark.parametrize("length", [18, 20])
+def test_reduced_hamiltonian_matches_full_sparse_reference_l18_l20(length):
     matrix = assemble_reduced_hamiltonian(build_orbit_basis(length))
     expected = _reference_reduced_hamiltonian(length)
-    rng = np.random.default_rng(length)
-    vector = rng.standard_normal(matrix.shape[1])
-    np.testing.assert_allclose(matrix @ vector, expected @ vector, atol=1e-11)
+    difference = matrix - expected
+    assert max_abs_sparse(difference) <= 1e-11
 
 
 def test_scalar_reflect_matches_site_centered_reference_convention():
