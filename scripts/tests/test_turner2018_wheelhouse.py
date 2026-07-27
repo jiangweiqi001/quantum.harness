@@ -16,6 +16,21 @@ from turner2018_wheelhouse import (
 
 REPO = Path(__file__).resolve().parents[2]
 MANIFEST = REPO / "scripts" / "turner2018_wheelhouse_manifest.json"
+EXPECTED_PACKAGES = {
+    "contourpy",
+    "cycler",
+    "fonttools",
+    "h5py",
+    "kiwisolver",
+    "matplotlib",
+    "numpy",
+    "packaging",
+    "pillow",
+    "pyparsing",
+    "python-dateutil",
+    "scipy",
+    "six",
+}
 
 
 def test_wheel_manifest_matches_uv_lock_versions_and_hashes():
@@ -24,8 +39,9 @@ def test_wheel_manifest_matches_uv_lock_versions_and_hashes():
     locked = {
         package["name"]: package
         for package in lock["package"]
-        if package["name"] in {"numpy", "scipy", "h5py"}
+        if package["name"] in EXPECTED_PACKAGES
     }
+    assert {package["name"] for package in manifest["packages"]} == EXPECTED_PACKAGES
     assert verify_lock(REPO / "uv.lock", manifest) == []
     for package in manifest["packages"]:
         entry = locked[package["name"]]
@@ -97,10 +113,14 @@ def test_smoke_install_passes_exact_manifested_wheel_paths(tmp_path, monkeypatch
     expected = [str(tmp_path / package["filename"]) for package in manifest["packages"]]
     assert install[-len(expected) :] == expected
     assert not any("==" in argument for argument in install)
+    smoke = next(command for command in calls if "-c" in command)
+    assert "matplotlib" in smoke[-1]
 
 
 def test_runtime_check_uses_manifest_python_and_exact_package_versions():
     manifest = load_manifest(MANIFEST)
+    assert manifest["smoke_import"]["expected_versions"]["matplotlib"] == "3.11.1"
+    assert "matplotlib" in manifest["smoke_import"]["command"]
     assert wheelhouse.check_runtime(
         manifest,
         python_version=(3, 12),
@@ -120,3 +140,14 @@ def test_runtime_check_uses_manifest_python_and_exact_package_versions():
         python_version=(3, 12),
         package_versions=wrong,
     ) == ["package version mismatch: numpy expected 2.4.6, found 0.0.0"]
+
+
+def test_check_runtime_executes_manifest_smoke_import(monkeypatch):
+    manifest = load_manifest(MANIFEST)
+    manifest["smoke_import"]["command"] = (
+        "raise RuntimeError('plotting smoke import attempted')"
+    )
+    monkeypatch.setattr(wheelhouse, "load_manifest", lambda _path: manifest)
+
+    with pytest.raises(RuntimeError, match="plotting smoke import attempted"):
+        wheelhouse.main(["--check-runtime"])

@@ -131,11 +131,14 @@ def smoke_install(wheelhouse: Path, manifest: dict, python: str) -> dict:
             ],
             check=True,
         )
+        expected_names = tuple(manifest["smoke_import"]["expected_versions"])
         command = (
-            "import json,platform,numpy,scipy,h5py;"
+            f"{manifest['smoke_import']['command']};"
+            "import importlib.metadata,json,platform;"
             "print(json.dumps({'python':platform.python_version(),"
-            "'machine':platform.machine(),'versions':{'numpy':numpy.__version__,"
-            "'scipy':scipy.__version__,'h5py':h5py.__version__}},sort_keys=True))"
+            "'machine':platform.machine(),'versions':"
+            f"{{name:importlib.metadata.version(name) for name in {expected_names!r}}}"
+            "},sort_keys=True))"
         )
         result = subprocess.run(
             [str(executable), "-c", command],
@@ -172,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = load_manifest(args.manifest)
     if args.check_runtime:
+        exec(manifest["smoke_import"]["command"], {})
         versions = {}
         for name in manifest["smoke_import"]["expected_versions"]:
             try:

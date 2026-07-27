@@ -1272,6 +1272,9 @@ class TurnerL32SlurmTests(unittest.TestCase):
 
     def test_dzeshell_common_runner_uses_shared_offline_paths(self):
         text = (SCRIPTS / "turner2018_dzeshell_run.sh").read_text()
+        manifest = json.loads(
+            (SCRIPTS / "turner2018_wheelhouse_manifest.json").read_text()
+        )
         root = "/work/share/giggleliu/jiangweiqi"
         self.assertIn(f'readonly TURNER_SHARED_ROOT="{root}"', text)
         self.assertIn(
@@ -1294,6 +1297,14 @@ class TurnerL32SlurmTests(unittest.TestCase):
         self.assertIn("turner2018_wheelhouse.py", text)
         self.assertIn("--check-runtime", text)
         self.assertIn("--stage all", text.replace("\n", " "))
+        self.assertEqual(
+            manifest["smoke_import"]["expected_versions"]["matplotlib"],
+            "3.11.1",
+        )
+        self.assertLess(
+            text.index("--check-runtime"),
+            text.index("exec \"$TURNER_PYTHON\""),
+        )
         self.assertNotIn("--declared-memory", text)
         self.assertIn('OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"', text)
 
