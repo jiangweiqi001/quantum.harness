@@ -6,6 +6,7 @@ import pytest
 import scipy.sparse as sp
 
 import turner2018_ed_observables as observables_module
+import turner2018_ed_validation as validation_module
 from pxp_ed import (
     constrained_basis,
     density_wave_state,
@@ -86,6 +87,12 @@ def test_streamed_pr2_preserves_complex_coefficients():
         stream_pr2(vectors, chunk_columns=1),
         np.sum(np.abs(vectors) ** 4, axis=0),
     )
+
+
+@pytest.mark.parametrize("chunk_columns", [0, -1, 1.5, True, np.bool_(False)])
+def test_streamed_pr2_rejects_invalid_chunk_columns(chunk_columns):
+    with pytest.raises((TypeError, ValueError), match="chunk_columns"):
+        stream_pr2(np.eye(2), chunk_columns=chunk_columns)
 
 
 @pytest.mark.parametrize("length", [10, 12, 14, 16])
@@ -234,6 +241,7 @@ def test_degenerate_invariant_comparison_uses_projectors_not_vector_pr2():
         candidate_vectors=candidate,
         reference_z2_sector_state=z2,
         candidate_z2_sector_state=z2,
+        chunk_columns=2,
     )
 
     assert diagnostics["max_total_z2_diff"] == pytest.approx(0.0, abs=1e-12)
@@ -243,6 +251,31 @@ def test_degenerate_invariant_comparison_uses_projectors_not_vector_pr2():
     assert diagnostics["isolated_group_count"] == 1
     # Rotating inside the degenerate two-state manifold changes vector-level PR2.
     assert diagnostics["max_pr2_diff_isolated"] == pytest.approx(0.0, abs=1e-12)
+    assert diagnostics["validation_chunk_columns"] == 2
+    assert diagnostics["orthogonality_sample_count"] > 0
+
+
+def test_degenerate_rotated_subspace_residual_is_stable():
+    rng = np.random.default_rng(417)
+    reference = np.linalg.qr(rng.normal(size=(48, 16)))[0]
+    rotation = np.linalg.qr(rng.normal(size=(16, 16)))[0]
+    candidate = reference @ rotation
+    energies = np.zeros(16)
+    z2 = reference[:, 0]
+
+    diagnostics = compare_degenerate_invariants(
+        reference_energies=energies,
+        reference_vectors=reference,
+        candidate_energies=energies,
+        candidate_vectors=candidate,
+        reference_z2_sector_state=z2,
+        candidate_z2_sector_state=z2,
+        chunk_columns=3,
+        orthogonality_samples=31,
+    )
+
+    assert diagnostics["max_subspace_sine"] <= 1e-12
+    assert diagnostics["subspace_chunk_columns"] == 3
 
 
 def test_degenerate_invariants_detect_same_diagonal_different_subspace():
@@ -262,6 +295,37 @@ def test_degenerate_invariants_detect_same_diagonal_different_subspace():
 
     assert diagnostics["max_projector_diag_diff"] == pytest.approx(0.0, abs=1e-14)
     assert diagnostics["max_subspace_sine"] == pytest.approx(1.0, abs=1e-14)
+
+
+def test_validation_paths_have_no_full_square_gram_or_identity():
+    source = "\n".join(
+        (
+            inspect.getsource(observables_module),
+            inspect.getsource(validation_module),
+        )
+    )
+    tree = ast.parse(source)
+
+    forbidden_eye_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "np"
+        and node.func.attr in {"eye", "identity"}
+    ]
+    assert not forbidden_eye_calls
+
+    forbidden_self_grams = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.MatMult):
+            continue
+        left = ast.unparse(node.left).replace(".conj()", "")
+        right = ast.unparse(node.right)
+        if left.endswith(".T") and left[:-2] == right:
+            forbidden_self_grams.append(ast.unparse(node))
+    assert not forbidden_self_grams
 
 
 def test_degenerate_invariants_reject_candidate_partition_mismatch():
@@ -294,6 +358,10 @@ def test_degenerate_invariants_reject_candidate_partition_mismatch():
         ("candidate_z2_sector_state", np.asarray([0.0, 1.0]), "Z2"),
         ("tolerance", 0.0, "tolerance"),
         ("tolerance", True, "tolerance"),
+        ("chunk_columns", 0, "chunk_columns"),
+        ("chunk_columns", True, "chunk_columns"),
+        ("orthogonality_samples", 0, "orthogonality_samples"),
+        ("orthogonality_samples", True, "orthogonality_samples"),
     ],
 )
 def test_degenerate_invariants_reject_invalid_inputs(field, replacement, message):
@@ -327,6 +395,7 @@ def test_compute_observables_consumes_eigensystem_without_dense_solve(monkeypatc
         energies,
         eigenvectors,
         chunk_size=3,
+        chunk_columns=3,
     )
 
     np.testing.assert_array_equal(result["energies"], energies)
@@ -334,6 +403,67 @@ def test_compute_observables_consumes_eigensystem_without_dense_solve(monkeypatc
     np.testing.assert_allclose(np.sum(result["overlap_z2"]), 0.5, atol=1e-12)
     assert "invariant_diagnostics" not in result
     assert result["fsa_shell_vectors_sector"].shape == (6, len(basis.representatives))
+    assert result["validation_metadata"]["chunk_columns"] == 3
+    assert result["validation_metadata"]["residual_columns_checked"] == len(energies)
+    assert result["validation_metadata"]["orthogonality_sample_count"] > 0
+
+
+def test_compute_observables_rejects_nonhermitian_matrix():
+    basis = build_orbit_basis(10)
+    hamiltonian = assemble_reduced_hamiltonian(basis)
+    energies, eigenvectors = np.linalg.eigh(hamiltonian.toarray())
+    broken = hamiltonian.copy().tolil()
+    broken[0, 1] += 0.25
+
+    with pytest.raises(ValueError, match="Hermitian"):
+        compute_observables(
+            basis,
+            broken.tocsr(),
+            energies,
+            eigenvectors,
+            chunk_size=4,
+        )
+
+
+def test_compute_observables_rejects_orthonormal_wrong_eigenpairs():
+    basis = build_orbit_basis(10)
+    hamiltonian = assemble_reduced_hamiltonian(basis)
+    energies, eigenvectors = np.linalg.eigh(hamiltonian.toarray())
+    wrong = eigenvectors.copy()
+    wrong[:, [0, 1]] = wrong[:, [1, 0]]
+
+    with pytest.raises(ValueError, match="residual"):
+        compute_observables(
+            basis,
+            hamiltonian,
+            energies,
+            wrong,
+            chunk_size=4,
+        )
+
+
+@pytest.mark.parametrize("state", [-1, 2**64, True, np.bool_(False)])
+def test_state_inputs_are_validated_before_uint64_conversion(state):
+    basis = build_orbit_basis(10)
+    with pytest.raises((TypeError, ValueError), match="state"):
+        project_product_state(basis, state)
+    with pytest.raises((TypeError, ValueError), match="state"):
+        stream_fsa_shells(basis, state, max_shell=0)
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1, 1.5, True, np.bool_(False)])
+def test_compute_observables_rejects_invalid_chunk_size(chunk_size):
+    basis = build_orbit_basis(10)
+    hamiltonian = assemble_reduced_hamiltonian(basis)
+    energies, eigenvectors = np.linalg.eigh(hamiltonian.toarray())
+    with pytest.raises((TypeError, ValueError), match="chunk_size"):
+        compute_observables(
+            basis,
+            hamiltonian,
+            energies,
+            eigenvectors,
+            chunk_size=chunk_size,
+        )
 
 
 @pytest.mark.parametrize(

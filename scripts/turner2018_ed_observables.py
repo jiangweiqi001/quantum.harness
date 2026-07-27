@@ -10,21 +10,20 @@ import scipy.sparse as sp
 
 from pxp_ed import density_wave_state
 from turner2018_ed_engine import OrbitBasis, assemble_reduced_hamiltonian, canonical_dihedral
+from turner2018_ed_validation import (
+    positive_integer,
+    uint64_state,
+    validate_eigenpair_residuals,
+    validate_hermitian,
+    validate_orthonormal_columns,
+)
 
 
 _BYTE_POPCOUNT = np.asarray([value.bit_count() for value in range(256)], dtype=np.uint8)
 
 
 def _validate_chunk_size(chunk_size: int) -> int:
-    if isinstance(chunk_size, (bool, np.bool_)):
-        raise TypeError("chunk_size must be a positive integer")
-    try:
-        value = operator.index(chunk_size)
-    except TypeError as error:
-        raise TypeError("chunk_size must be a positive integer") from error
-    if value < 1:
-        raise ValueError("chunk_size must be a positive integer")
-    return value
+    return positive_integer(chunk_size, "chunk_size")
 
 
 def _validate_max_shell(max_shell: int | None, length: int) -> int:
@@ -87,6 +86,7 @@ def project_product_state(
 ) -> np.ndarray:
     """Project one constrained product state into the orbit basis."""
     _validate_chunk_size(chunk_size)
+    product_state = uint64_state(product_state, "product_state")
     states = basis.constrained_states
     position = int(np.searchsorted(states, np.uint64(product_state)))
     if position >= len(states) or int(states[position]) != int(product_state):
@@ -104,14 +104,12 @@ def project_product_state(
 
 def stream_pr2(vectors: np.ndarray, chunk_columns: int = 256) -> np.ndarray:
     """Compute PR2 column-wise using bounded temporary memory."""
+    chunk_columns = positive_integer(chunk_columns, "chunk_columns")
     array = np.asarray(vectors)
     if array.ndim == 1:
         return np.asarray([np.sum(np.abs(array) ** 4)], dtype=np.float64)
     if array.ndim != 2:
         raise ValueError("vectors must be a one- or two-dimensional array")
-    if chunk_columns < 1:
-        raise ValueError("chunk_columns must be positive")
-
     result = np.empty(array.shape[1], dtype=np.float64)
     for start in range(0, array.shape[1], chunk_columns):
         stop = min(start + chunk_columns, array.shape[1])
@@ -144,6 +142,7 @@ def stream_fsa_shells(
 ) -> StreamedFSAResult:
     """Stream FSA shells on the full constrained basis and project each shell."""
     chunk_size = _validate_chunk_size(chunk_size)
+    initial_state = uint64_state(initial_state, "initial_state")
 
     states = np.asarray(basis.constrained_states, dtype=np.uint64)
     full_dimension = len(states)
@@ -278,6 +277,39 @@ def stream_fsa_shells(
     )
 
 
+def _projector_diagonal_chunked(
+    vectors: np.ndarray,
+    group: np.ndarray,
+    *,
+    chunk_columns: int,
+) -> np.ndarray:
+    diagonal = np.zeros(vectors.shape[0], dtype=np.float64)
+    for start in range(0, group.size, chunk_columns):
+        stop = min(start + chunk_columns, group.size)
+        block = vectors[:, group[start:stop]]
+        diagonal += np.sum(np.abs(block) ** 2, axis=1)
+    return diagonal
+
+
+def _two_way_subspace_residual(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+    *,
+    chunk_columns: int,
+) -> float:
+    maximum = 0.0
+    for source, target in ((candidate, reference), (reference, candidate)):
+        for start in range(0, source.shape[1], chunk_columns):
+            stop = min(start + chunk_columns, source.shape[1])
+            block = source[:, start:stop]
+            projected = target @ (target.conj().T @ block)
+            residual_norms = np.sqrt(
+                np.sum(np.abs(block - projected) ** 2, axis=0)
+            )
+            maximum = max(maximum, float(np.max(residual_norms)))
+    return maximum
+
+
 def compare_degenerate_invariants(
     *,
     reference_energies: np.ndarray,
@@ -287,8 +319,14 @@ def compare_degenerate_invariants(
     reference_z2_sector_state: np.ndarray,
     candidate_z2_sector_state: np.ndarray,
     tolerance: float = 1e-10,
+    chunk_columns: int = 256,
+    orthogonality_samples: int = 4096,
 ) -> dict[str, float | int]:
-    """Compare complete eigenspaces with basis-invariant principal angles."""
+    """Compare complete eigenspaces using bounded two-way projector residuals."""
+    chunk_columns = positive_integer(chunk_columns, "chunk_columns")
+    orthogonality_samples = positive_integer(
+        orthogonality_samples, "orthogonality_samples"
+    )
     if (
         isinstance(tolerance, (bool, np.bool_))
         or not np.isscalar(tolerance)
@@ -328,14 +366,13 @@ def compare_degenerate_invariants(
             raise ValueError(f"{name} vectors must be two-dimensional")
         if vectors.shape[1] != energies.size:
             raise ValueError(f"{name} vector columns must match energies")
-        if not np.all(np.isfinite(vectors)):
-            raise ValueError(f"{name} vectors must be finite")
-        gram = vectors.conj().T @ vectors
-        orthogonality_error = float(
-            np.max(np.abs(gram - np.eye(vectors.shape[1], dtype=gram.dtype)))
+        validate_orthonormal_columns(
+            vectors,
+            chunk_columns=chunk_columns,
+            orthogonality_samples=orthogonality_samples,
+            tolerance=tolerance,
+            name=name,
         )
-        if orthogonality_error > tolerance:
-            raise ValueError(f"{name} vectors must be orthonormal")
     if vectors_ref.shape[0] != vectors_candidate.shape[0]:
         raise ValueError("reference and candidate vector row dimensions must match")
 
@@ -381,17 +418,27 @@ def compare_degenerate_invariants(
         )
         max_total_z2_diff = max(max_total_z2_diff, total_z2_diff)
 
-        projector_diag_ref = np.sum(np.abs(vectors_ref[:, group]) ** 2, axis=1)
-        projector_diag_candidate = np.sum(np.abs(vectors_candidate[:, group]) ** 2, axis=1)
+        projector_diag_ref = _projector_diagonal_chunked(
+            vectors_ref,
+            group,
+            chunk_columns=chunk_columns,
+        )
+        projector_diag_candidate = _projector_diagonal_chunked(
+            vectors_candidate,
+            group,
+            chunk_columns=chunk_columns,
+        )
         projector_diag_diff = float(
             np.max(np.abs(projector_diag_ref - projector_diag_candidate))
         )
         max_projector_diag_diff = max(max_projector_diag_diff, projector_diag_diff)
 
-        cross_gram = vectors_ref[:, group].conj().T @ vectors_candidate[:, group]
-        singular_values = np.linalg.svd(cross_gram, compute_uv=False)
-        smallest_cosine = float(np.clip(np.min(singular_values), 0.0, 1.0))
-        subspace_sine = float(np.sqrt(max(0.0, 1.0 - smallest_cosine**2)))
+        group_slice = slice(int(group[0]), int(group[-1]) + 1)
+        subspace_sine = _two_way_subspace_residual(
+            vectors_ref[:, group_slice],
+            vectors_candidate[:, group_slice],
+            chunk_columns=chunk_columns,
+        )
         max_subspace_sine = max(max_subspace_sine, subspace_sine)
 
         if len(group) == 1:
@@ -408,6 +455,12 @@ def compare_degenerate_invariants(
         "max_pr2_diff_isolated": max_pr2_diff_isolated,
         "degenerate_group_count": degenerate_groups,
         "isolated_group_count": isolated_groups,
+        "validation_chunk_columns": min(chunk_columns, vectors_ref.shape[1]),
+        "subspace_chunk_columns": min(chunk_columns, vectors_ref.shape[1]),
+        "orthogonality_sample_count": min(
+            orthogonality_samples,
+            vectors_ref.shape[1] * (vectors_ref.shape[1] - 1) // 2,
+        ),
     }
 
 
@@ -419,9 +472,15 @@ def compute_observables(
     *,
     z2_pattern: int = 2,
     chunk_size: int = 262144,
-) -> dict[str, np.ndarray]:
+    chunk_columns: int = 256,
+    orthogonality_samples: int = 4096,
+) -> dict[str, object]:
     """Compute observables from a validated Task 3 eigensystem without solving."""
     chunk_size = _validate_chunk_size(chunk_size)
+    chunk_columns = positive_integer(chunk_columns, "chunk_columns")
+    orthogonality_samples = positive_integer(
+        orthogonality_samples, "orthogonality_samples"
+    )
     representatives = np.asarray(basis.representatives)
     orbit_sizes = np.asarray(basis.orbit_sizes)
     constrained_states = np.asarray(basis.constrained_states)
@@ -446,6 +505,11 @@ def compute_observables(
     )
     if not np.all(np.isfinite(matrix_values)):
         raise ValueError("Hamiltonian values must be finite")
+    hermiticity_error = validate_hermitian(
+        reduced_hamiltonian,
+        chunk_columns=chunk_columns,
+        tolerance=1e-10,
+    )
 
     energy_array = np.asarray(energies)
     if np.iscomplexobj(energy_array):
@@ -464,11 +528,20 @@ def compute_observables(
         reduced_dimension,
     ):
         raise ValueError("eigenvectors dimensions must match the basis and energies")
-    if not np.all(np.isfinite(vector_array)):
-        raise ValueError("eigenvectors must be finite")
-    gram = vector_array.conj().T @ vector_array
-    if float(np.max(np.abs(gram - np.eye(reduced_dimension)))) > 1e-10:
-        raise ValueError("eigenvectors must be orthonormal")
+    validation = validate_orthonormal_columns(
+        vector_array,
+        chunk_columns=chunk_columns,
+        orthogonality_samples=orthogonality_samples,
+        tolerance=1e-10,
+        name="eigenvectors",
+    )
+    residual_error = validate_eigenpair_residuals(
+        reduced_hamiltonian,
+        energy_array,
+        vector_array,
+        chunk_columns=chunk_columns,
+        tolerance=1e-10,
+    )
 
     initial_state = density_wave_state(basis.length, z2_pattern)
     z2_sector = project_product_state(
@@ -477,7 +550,7 @@ def compute_observables(
         chunk_size=chunk_size,
     )
     overlap_z2 = np.abs(vector_array.conj().T @ z2_sector) ** 2
-    pr2 = stream_pr2(vector_array)
+    pr2 = stream_pr2(vector_array, chunk_columns=chunk_columns)
 
     streamed_fsa = stream_fsa_shells(
         basis,
@@ -498,4 +571,17 @@ def compute_observables(
             streamed_fsa.reduced_fsa_hamiltonian, dtype=np.float64
         ),
         "fsa_beta_full_chain": np.asarray(streamed_fsa.beta, dtype=np.float64),
+        "validation_metadata": {
+            "chunk_columns": min(chunk_columns, reduced_dimension),
+            "finite_columns_checked": validation["columns_checked"],
+            "norm_columns_checked": validation["columns_checked"],
+            "residual_columns_checked": reduced_dimension,
+            "orthogonality_sample_count": validation[
+                "orthogonality_sample_count"
+            ],
+            "max_norm_error": validation["max_norm_error"],
+            "max_sample_overlap": validation["max_sample_overlap"],
+            "max_hermiticity_error": hermiticity_error,
+            "max_eigenpair_residual": residual_error,
+        },
     }

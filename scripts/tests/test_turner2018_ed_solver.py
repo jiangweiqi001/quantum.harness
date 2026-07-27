@@ -1,8 +1,12 @@
 import numpy as np
 import pytest
 import scipy.sparse as sp
+import ast
+import inspect
 
 from turner2018_ed_engine import assemble_reduced_hamiltonian, build_orbit_basis
+import turner2018_ed_solver as solver_module
+import turner2018_ed_validation as validation_module
 from turner2018_ed_solver import estimate_dense_resources, solve_full_eigensystem
 
 
@@ -75,6 +79,50 @@ def test_dense_solver_requires_declared_memory_argument():
     matrix = _reduced_hamiltonian(10)
     with pytest.raises(TypeError):
         solve_full_eigensystem(matrix, vectors=True)  # type: ignore[call-arg]
+
+
+def test_dense_solver_validation_has_no_full_square_gram_or_identity():
+    tree = ast.parse(
+        "\n".join(
+            (
+                inspect.getsource(solver_module),
+                inspect.getsource(validation_module),
+            )
+        )
+    )
+    forbidden_eye_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "np"
+        and node.func.attr in {"eye", "identity"}
+    ]
+    assert not forbidden_eye_calls
+
+    forbidden_self_grams = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.MatMult):
+            continue
+        left = ast.unparse(node.left).replace(".conj()", "")
+        right = ast.unparse(node.right)
+        if left.endswith(".T") and left[:-2] == right:
+            forbidden_self_grams.append(ast.unparse(node))
+    assert not forbidden_self_grams
+
+
+@pytest.mark.parametrize("chunk_columns", [0, -1, 1.5, True, np.bool_(False)])
+def test_dense_solver_rejects_invalid_validation_chunk_columns(chunk_columns):
+    matrix = _reduced_hamiltonian(10)
+    estimate = estimate_dense_resources(matrix.shape[0], vectors=True)
+    with pytest.raises((TypeError, ValueError), match="validation_chunk_columns"):
+        solve_full_eigensystem(
+            matrix,
+            vectors=True,
+            declared_memory_bytes=estimate.minimum_requested_bytes,
+            validation_chunk_columns=chunk_columns,
+        )
 
 
 def test_dense_solver_rejects_before_toarray_when_memory_insufficient(monkeypatch):

@@ -8,6 +8,12 @@ import numpy as np
 import scipy.linalg
 import scipy.sparse as sp
 
+from turner2018_ed_validation import (
+    positive_integer,
+    validate_eigenpair_residuals,
+    validate_orthonormal_columns,
+)
+
 
 @dataclass(frozen=True)
 class DenseResourceEstimate:
@@ -56,8 +62,16 @@ def solve_full_eigensystem(
     *,
     vectors: bool,
     declared_memory_bytes: int,
+    validation_chunk_columns: int = 256,
+    orthogonality_samples: int = 4096,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Solve the full dense eigensystem from a deterministic real symmetric CSR."""
+    validation_chunk_columns = positive_integer(
+        validation_chunk_columns, "validation_chunk_columns"
+    )
+    orthogonality_samples = positive_integer(
+        orthogonality_samples, "orthogonality_samples"
+    )
     _validate_real_symmetric_csr(matrix)
     estimate = estimate_dense_resources(matrix.shape[0], vectors=vectors)
     if declared_memory_bytes < estimate.minimum_requested_bytes:
@@ -77,21 +91,26 @@ def solve_full_eigensystem(
             overwrite_a=True,
             check_finite=False,
         )
-        residual = float(
-            np.max(np.abs(matrix @ eigenvectors - eigenvectors * energies[np.newaxis, :]))
+        validate_eigenpair_residuals(
+            matrix,
+            energies,
+            eigenvectors,
+            chunk_columns=validation_chunk_columns,
+            tolerance=1e-11,
+            error_type=RuntimeError,
         )
-        if residual > 1e-11:
-            raise RuntimeError(f"eigenvector residual exceeds tolerance: {residual}")
-        orthogonality = float(
-            np.max(
-                np.abs(
-                    eigenvectors.T @ eigenvectors
-                    - np.eye(eigenvectors.shape[1], dtype=np.float64)
-                )
+        try:
+            validate_orthonormal_columns(
+                eigenvectors,
+                chunk_columns=validation_chunk_columns,
+                orthogonality_samples=orthogonality_samples,
+                tolerance=1e-11,
+                name="eigenvectors",
             )
-        )
-        if orthogonality > 1e-11:
-            raise RuntimeError(f"eigenvector orthogonality exceeds tolerance: {orthogonality}")
+        except ValueError as error:
+            raise RuntimeError(
+                "eigenvector orthogonality exceeds tolerance"
+            ) from error
         return np.asarray(energies, dtype=np.float64), np.asarray(eigenvectors, dtype=np.float64)
 
     energies = scipy.linalg.eigvalsh(
