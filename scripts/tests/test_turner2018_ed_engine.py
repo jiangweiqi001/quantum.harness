@@ -1,14 +1,31 @@
 import numpy as np
 import pytest
+import scipy.sparse as sp
 
-from pxp_ed import _reflect, _rotate, constrained_basis, symmetry_basis_k0_inversion_even
+from pxp_ed import (
+    _reflect,
+    _rotate,
+    constrained_basis,
+    pxp_hamiltonian,
+    symmetry_basis_k0_inversion_even,
+)
 from turner2018_ed_engine import (
     OrbitBasis,
+    assemble_reduced_hamiltonian,
     build_orbit_basis,
     canonical_dihedral,
     dihedral_members,
     enumerate_constrained_states,
 )
+
+EXPECTED_SECTOR_DIMENSIONS = {
+    10: 14,
+    12: 26,
+    14: 49,
+    16: 99,
+    18: 209,
+    20: 455,
+}
 
 
 def _scalar_rotate_left(value: int, shift: int, length: int) -> int:
@@ -60,6 +77,68 @@ def _reference_column_data(length: int):
     gram = transform.T @ transform
     np.testing.assert_allclose(gram, np.eye(transform.shape[1]), atol=1e-14)
     return constrained, np.asarray(representatives), np.asarray(orbit_sizes), supports_by_representative
+
+
+def max_abs_sparse(matrix: sp.spmatrix) -> float:
+    if matrix.nnz == 0:
+        return 0.0
+    return float(np.max(np.abs(matrix.data)))
+
+
+def _reference_reduced_hamiltonian(length: int) -> sp.csr_matrix:
+    full_states = constrained_basis(length, pbc=True)
+    full_h = pxp_hamiltonian(full_states, length, pbc=True)
+    q = symmetry_basis_k0_inversion_even(full_states, length)
+    return (q.T @ full_h @ q).tocsr()
+
+
+@pytest.mark.parametrize("length", [10, 12, 14, 16])
+def test_direct_reduced_hamiltonian_matches_qt_h_q(length):
+    orbit = build_orbit_basis(length)
+    actual = assemble_reduced_hamiltonian(orbit)
+    expected = _reference_reduced_hamiltonian(length)
+    difference = actual - expected
+    assert max_abs_sparse(difference) <= 1e-11
+
+
+@pytest.mark.parametrize("length", [10, 12, 14, 16, 18, 20])
+def test_reduced_hamiltonian_is_symmetric_and_off_diagonal(length):
+    matrix = assemble_reduced_hamiltonian(build_orbit_basis(length))
+    assert max_abs_sparse(matrix - matrix.T) <= 1e-13
+    assert np.count_nonzero(matrix.diagonal()) == 0
+
+
+@pytest.mark.parametrize("length", [10, 12, 14, 16, 18, 20])
+def test_reduced_hamiltonian_csr_layout_is_deterministic(length):
+    first = assemble_reduced_hamiltonian(build_orbit_basis(length))
+    second = assemble_reduced_hamiltonian(build_orbit_basis(length))
+
+    assert first.shape == second.shape
+    assert first.nnz == second.nnz
+    assert first.data.tobytes() == second.data.tobytes()
+    assert first.indices.tobytes() == second.indices.tobytes()
+    assert first.indptr.tobytes() == second.indptr.tobytes()
+
+
+@pytest.mark.parametrize("length", [10, 12, 14, 16, 18, 20])
+def test_reduced_hamiltonian_dimensions_match_expected_sector_sizes(length):
+    basis = build_orbit_basis(length)
+    matrix = assemble_reduced_hamiltonian(basis)
+    assert len(basis.constrained_states) == len(constrained_basis(length, pbc=True))
+    assert len(basis.representatives) == EXPECTED_SECTOR_DIMENSIONS[length]
+    assert matrix.shape == (
+        EXPECTED_SECTOR_DIMENSIONS[length],
+        EXPECTED_SECTOR_DIMENSIONS[length],
+    )
+
+
+@pytest.mark.parametrize("length", [10, 12, 14, 16, 18, 20])
+def test_reduced_hamiltonian_matvec_matches_reference_through_l20(length):
+    matrix = assemble_reduced_hamiltonian(build_orbit_basis(length))
+    expected = _reference_reduced_hamiltonian(length)
+    rng = np.random.default_rng(length)
+    vector = rng.standard_normal(matrix.shape[1])
+    np.testing.assert_allclose(matrix @ vector, expected @ vector, atol=1e-11)
 
 
 def test_scalar_reflect_matches_site_centered_reference_convention():

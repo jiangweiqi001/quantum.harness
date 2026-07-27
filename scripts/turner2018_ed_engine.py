@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import scipy.sparse as sp
 
 
 def _validate_length(length: int) -> None:
@@ -162,3 +163,67 @@ def build_orbit_basis(length: int, chunk_size: int = 262144) -> OrbitBasis:
         representatives=representatives,
         orbit_sizes=orbit_sizes,
     )
+
+
+def assemble_reduced_hamiltonian(basis: OrbitBasis) -> sp.csr_matrix:
+    """Assemble the direct reduced PXP Hamiltonian in the k=0, inversion-even basis."""
+    length = basis.length
+    _validate_length(length)
+
+    representatives = np.asarray(basis.representatives, dtype=np.uint64)
+    orbit_sizes = np.asarray(basis.orbit_sizes, dtype=np.float64)
+    dimension = len(representatives)
+
+    rows: list[int] = []
+    columns: list[int] = []
+    values: list[float] = []
+
+    for source_index, source_representative in enumerate(representatives):
+        source_state = int(source_representative)
+        destination_counts: dict[int, int] = {}
+
+        for site in range(length):
+            left = (site - 1) % length
+            right = (site + 1) % length
+            left_empty = ((source_state >> left) & 1) == 0
+            right_empty = ((source_state >> right) & 1) == 0
+            if not (left_empty and right_empty):
+                continue
+
+            flipped_state = np.uint64(source_state ^ (1 << site))
+            destination_representative = int(
+                canonical_dihedral(
+                    np.asarray([flipped_state], dtype=np.uint64),
+                    length,
+                )[0]
+            )
+            destination_counts[destination_representative] = (
+                destination_counts.get(destination_representative, 0) + 1
+            )
+
+        if not destination_counts:
+            continue
+
+        destination_representatives = np.asarray(
+            sorted(destination_counts.keys()),
+            dtype=np.uint64,
+        )
+        destination_indices = basis.index_of(destination_representatives)
+        source_orbit_size = orbit_sizes[source_index]
+
+        for destination_representative, destination_index in zip(
+            destination_representatives, destination_indices, strict=True
+        ):
+            multiplicity = destination_counts[int(destination_representative)]
+            destination_orbit_size = orbit_sizes[destination_index]
+            value = multiplicity * np.sqrt(source_orbit_size / destination_orbit_size)
+            rows.append(int(destination_index))
+            columns.append(source_index)
+            values.append(float(value))
+
+    reduced = sp.coo_matrix((values, (rows, columns)), shape=(dimension, dimension))
+    reduced_csr = reduced.tocsr()
+    reduced_csr.sum_duplicates()
+    reduced_csr.eliminate_zeros()
+    reduced_csr.sort_indices()
+    return reduced_csr
