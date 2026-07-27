@@ -773,3 +773,80 @@ completed without errors.
   no adversarial concurrent filesystem mutation was attempted.
 - Git author configuration remains absent, so commits use per-command identity
   values matching repository history without changing Git configuration.
+
+---
+
+# Dzeshell final review: pre-source submit validation
+
+## Status
+DONE
+
+## Fix
+- Every Dzeshell resource wrapper now performs its own validation before
+  sourcing any code.
+- The wrapper rejects an unset or nonexistent `SLURM_SUBMIT_DIR`, canonicalizes
+  the fixed shared root and submit directory with trusted system `realpath -e`,
+  rejects canonical paths outside `/work/share/giggleliu/jiangweiqi`, and
+  canonicalizes the exact
+  `scripts/turner2018_dzeshell_run.sh` target.
+- A symlinked runner or `scripts/` escape is rejected because the canonical
+  runner must exactly equal the canonical checkout-relative path and be a
+  regular file.
+- No validation helper is sourced or executed. Only shell builtins and
+  `realpath` run before the canonical common runner is sourced.
+
+## Strict TDD evidence
+Tests were changed before wrapper production edits.
+
+RED:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests -q
+```
+```text
+5 failed, 11 passed, 13 subtests passed in 0.47s
+```
+The attacker fixture executed the external runner and returned zero before the
+fix. Static checks also showed that all three wrappers sourced the unvalidated
+environment path, and unset/nonexistent paths did not use the required
+fail-closed exit contract.
+
+GREEN:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests -q
+```
+```text
+13 passed, 16 subtests passed in 0.36s
+```
+
+The focused tests prove:
+- a copied spool wrapper executes the exact canonical runner for a valid
+  synthetic shared-root checkout;
+- an attacker runner outside the production root cannot create its sentinel;
+- unset and nonexistent submit directories are rejected;
+- a submit-directory symlink from inside the allowed root to an attacker
+  checkout is rejected without creating its sentinel;
+- each wrapper validates and canonicalizes before its only `source`.
+
+## Full verification
+```bash
+.venv/bin/python -m pytest scripts/tests -q
+```
+```text
+654 passed, 11 skipped, 66 subtests passed in 94.23s
+```
+
+`bash -n` covered all three Dzeshell wrappers, the common runner, and the
+unchanged SCNet wrapper. `py_compile`, `git diff --check`, and IDE lints all
+completed without errors.
+
+## Implementation commit
+- `102c4b4` — `Validate Dzeshell submit path before sourcing`
+
+## Concerns
+- `/work/share/giggleliu/jiangweiqi` is not mounted on this local host. The
+  valid and symlink-escape execution cases therefore substitute a temporary
+  fixed root into a copied wrapper while separately asserting the production
+  literal in every tracked wrapper.
+- No real Slurm submission was made; the explicit-approval gate remains intact.
