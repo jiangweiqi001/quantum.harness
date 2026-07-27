@@ -356,9 +356,20 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                 path.parent.mkdir(exist_ok=True)
                 path.write_bytes(payload)
                 generation_id = generation_id or path.stem
+                figure_arrays = {}
+                if path == fig3_artifact:
+                    figure_arrays = {
+                        "panel_b_L10_shell": np.arange(6),
+                        "panel_b_L10_exact_weights": np.full(6, 0.05),
+                        "panel_b_L10_fsa_weights": np.full(6, 1.0 / 6.0),
+                        "panel_c_L10_shell": np.arange(6),
+                        "panel_c_L10_exact_weights": np.full(6, 0.04),
+                        "panel_c_L10_fsa_weights": np.full(6, 1.0 / 6.0),
+                    }
                 np.savez(
                     path.with_suffix(".npz"),
                     generation_id=np.asarray(generation_id),
+                    **figure_arrays,
                     **(
                         {f"L{lengths[0]}_source": np.asarray("independent-ed")}
                         if lengths and len(lengths) == 1
@@ -383,6 +394,58 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                         ).hexdigest(),
                     },
                 }
+                if path == fig3_artifact:
+                    selected = [
+                        {
+                            "panel": "b",
+                            "role": "lowest-matched-scar",
+                            "exact_index": 1,
+                            "exact_energy": -3.0,
+                            "fsa_index": 0,
+                            "fsa_energy": -2.9,
+                            "match_strength": 0.3,
+                            "zero_tolerance": 1e-10,
+                            "full_fsa_shell_count": 11,
+                            "plotted_folded_shell_count": 6,
+                            "folding": (
+                                "k=0 inversion-even: n and L-n are symmetry-related"
+                            ),
+                            "exact_weight_sum": 0.3,
+                            "fsa_weight_sum": 1.0,
+                        },
+                        {
+                            "panel": "c",
+                            "role": "negative-adjacent-to-zero",
+                            "exact_index": 5,
+                            "exact_energy": -0.1,
+                            "fsa_index": 2,
+                            "fsa_energy": -0.09,
+                            "match_strength": 0.24,
+                            "zero_tolerance": 1e-10,
+                            "full_fsa_shell_count": 11,
+                            "plotted_folded_shell_count": 6,
+                            "folding": (
+                                "k=0 inversion-even: n and L-n are symmetry-related"
+                            ),
+                            "exact_weight_sum": 0.24,
+                            "fsa_weight_sum": 1.0,
+                        },
+                    ]
+                    metrics.update(
+                        {
+                            "primary_length": 10,
+                            "selected_panel_states": selected,
+                            "plot_conventions": {
+                                panel: {
+                                    "exact": "black circles, solid line",
+                                    "fsa": "red crosses, dashed line",
+                                    "x": "folded FSA shell index n=0..L/2",
+                                    "y": "squared shell weight, linear",
+                                }
+                                for panel in ("panel_b", "panel_c")
+                            },
+                        }
+                    )
                 if lengths is not None:
                     metrics.update(
                         {
@@ -487,9 +550,20 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                 payload = path.name.encode()
                 path.write_bytes(payload)
                 generation_id = path.stem
+                figure_arrays = {}
+                if path == fig3:
+                    figure_arrays = {
+                        "panel_b_L10_shell": np.arange(6),
+                        "panel_b_L10_exact_weights": np.full(6, 0.05),
+                        "panel_b_L10_fsa_weights": np.full(6, 1.0 / 6.0),
+                        "panel_c_L10_shell": np.arange(6),
+                        "panel_c_L10_exact_weights": np.full(6, 0.04),
+                        "panel_c_L10_fsa_weights": np.full(6, 1.0 / 6.0),
+                    }
                 np.savez(
                     path.with_suffix(".npz"),
                     generation_id=np.asarray(generation_id),
+                    **figure_arrays,
                 )
                 metrics = {
                     "source": "independent-ed",
@@ -505,6 +579,57 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                         ).hexdigest(),
                     },
                 }
+                if path == fig3:
+                    metrics.update(
+                        {
+                            "primary_length": 10,
+                            "selected_panel_states": [
+                                {
+                                    "panel": "b",
+                                    "role": "lowest-matched-scar",
+                                    "exact_index": 1,
+                                    "exact_energy": -3.0,
+                                    "fsa_index": 0,
+                                    "fsa_energy": -2.9,
+                                    "match_strength": 0.3,
+                                    "zero_tolerance": 1e-10,
+                                    "full_fsa_shell_count": 11,
+                                    "plotted_folded_shell_count": 6,
+                                    "folding": (
+                                        "k=0 inversion-even: n and L-n are symmetry-related"
+                                    ),
+                                    "exact_weight_sum": 0.3,
+                                    "fsa_weight_sum": 1.0,
+                                },
+                                {
+                                    "panel": "c",
+                                    "role": "negative-adjacent-to-zero",
+                                    "exact_index": 5,
+                                    "exact_energy": -0.1,
+                                    "fsa_index": 2,
+                                    "fsa_energy": -0.09,
+                                    "match_strength": 0.24,
+                                    "zero_tolerance": 1e-10,
+                                    "full_fsa_shell_count": 11,
+                                    "plotted_folded_shell_count": 6,
+                                    "folding": (
+                                        "k=0 inversion-even: n and L-n are symmetry-related"
+                                    ),
+                                    "exact_weight_sum": 0.24,
+                                    "fsa_weight_sum": 1.0,
+                                },
+                            ],
+                            "plot_conventions": {
+                                panel: {
+                                    "exact": "black circles, solid line",
+                                    "fsa": "red crosses, dashed line",
+                                    "x": "folded FSA shell index n=0..L/2",
+                                    "y": "squared shell weight, linear",
+                                }
+                                for panel in ("panel_b", "panel_c")
+                            },
+                        }
+                    )
                 if path == fig4:
                     metrics.update(
                         {
@@ -561,6 +686,131 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "generation identity"):
                 server._accepted_figure(path, "Fig. 4", length=20)
+
+    def test_fig3_acceptance_rejects_stale_or_corrupt_shell_selection_metadata(self):
+        import numpy as np
+        import turner2018_l32_server as server
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fig3_independent_L20.png"
+            npz = path.with_suffix(".npz")
+            path.write_bytes(b"png")
+            arrays = {
+                "generation_id": np.asarray("same-generation"),
+                "panel_b_L20_shell": np.arange(11),
+                "panel_b_L20_exact_weights": np.full(11, 0.04),
+                "panel_b_L20_fsa_weights": np.full(11, 1.0 / 11.0),
+                "panel_c_L20_shell": np.arange(11),
+                "panel_c_L20_exact_weights": np.full(11, 0.03),
+                "panel_c_L20_fsa_weights": np.full(11, 1.0 / 11.0),
+            }
+            np.savez(npz, **arrays)
+            selected = [
+                {
+                    "panel": "b",
+                    "role": "lowest-matched-scar",
+                    "exact_index": 4,
+                    "exact_energy": -4.2,
+                    "fsa_index": 0,
+                    "fsa_energy": -4.1,
+                    "match_strength": 0.44,
+                    "zero_tolerance": 1e-10,
+                    "full_fsa_shell_count": 21,
+                    "plotted_folded_shell_count": 11,
+                    "folding": (
+                        "k=0 inversion-even: n and L-n are symmetry-related"
+                    ),
+                    "exact_weight_sum": 0.44,
+                    "fsa_weight_sum": 1.0,
+                },
+                {
+                    "panel": "c",
+                    "role": "negative-adjacent-to-zero",
+                    "exact_index": 220,
+                    "exact_energy": -0.07,
+                    "fsa_index": 5,
+                    "fsa_energy": -0.06,
+                    "match_strength": 0.33,
+                    "zero_tolerance": 1e-10,
+                    "full_fsa_shell_count": 21,
+                    "plotted_folded_shell_count": 11,
+                    "folding": (
+                        "k=0 inversion-even: n and L-n are symmetry-related"
+                    ),
+                    "exact_weight_sum": 0.33,
+                    "fsa_weight_sum": 1.0,
+                },
+            ]
+            metrics = {
+                "source": "independent-ed",
+                "primary_length": 20,
+                "generation_id": "same-generation",
+                "selected_panel_states": selected,
+                "plot_conventions": {
+                    "panel_b": {
+                        "exact": "black circles, solid line",
+                        "fsa": "red crosses, dashed line",
+                        "x": "folded FSA shell index n=0..L/2",
+                        "y": "squared shell weight, linear",
+                    },
+                    "panel_c": {
+                        "exact": "black circles, solid line",
+                        "fsa": "red crosses, dashed line",
+                        "x": "folded FSA shell index n=0..L/2",
+                        "y": "squared shell weight, linear",
+                    },
+                },
+                "acceptance": {
+                    "passed": True,
+                    "generated_source": "independent-ed",
+                },
+                "generation_assets": {
+                    "png_sha256": hashlib.sha256(b"png").hexdigest(),
+                    "npz_sha256": hashlib.sha256(npz.read_bytes()).hexdigest(),
+                },
+            }
+            metrics_path = path.with_suffix(".json")
+            metrics_path.write_text(json.dumps(metrics))
+
+            accepted = server._accepted_figure(path, "Fig. 3", length=20)
+            self.assertEqual(accepted["generation_id"], "same-generation")
+
+            corruptions = (
+                ("stale length", lambda value: value.update(primary_length=18)),
+                (
+                    "wrong shell count",
+                    lambda value: value["selected_panel_states"][0].update(
+                        plotted_folded_shell_count=21
+                    ),
+                ),
+                (
+                    "wrong role",
+                    lambda value: value["selected_panel_states"][1].update(
+                        role="interior-special"
+                    ),
+                ),
+                (
+                    "nonnegative adjacent",
+                    lambda value: value["selected_panel_states"][1].update(
+                        exact_energy=0.07
+                    ),
+                ),
+                (
+                    "normalization mismatch",
+                    lambda value: value["selected_panel_states"][0].update(
+                        exact_weight_sum=0.9
+                    ),
+                ),
+            )
+            for label, corrupt in corruptions:
+                with self.subTest(label=label):
+                    candidate = json.loads(json.dumps(metrics))
+                    corrupt(candidate)
+                    metrics_path.write_text(json.dumps(candidate))
+                    with self.assertRaisesRegex(
+                        RuntimeError, "Fig. 3.*selection|shell|length|normalization"
+                    ):
+                        server._accepted_figure(path, "Fig. 3", length=20)
 
     def test_production_fig4_gate_requires_accepted_statistics(self):
         import numpy as np

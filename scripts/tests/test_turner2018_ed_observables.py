@@ -152,6 +152,20 @@ def test_streamed_fsa_is_invariant_to_small_chunks():
         assert candidate.distance_dtype == "uint8"
 
 
+def test_l20_streamed_recurrence_and_folded_plot_shell_counts_are_distinct():
+    length = 20
+    orbit = build_orbit_basis(length)
+    streamed = stream_fsa_shells(
+        orbit,
+        density_wave_state(length, 2),
+        chunk_size=1024,
+    )
+
+    assert len(streamed.beta) + 1 == length + 1
+    assert streamed.projected_shells.shape[0] == length // 2 + 1 == 11
+    assert streamed.reduced_fsa_hamiltonian.shape == (11, 11)
+
+
 def test_streamed_fsa_has_no_scalar_per_state_propagation_loop():
     tree = ast.parse(inspect.getsource(stream_fsa_shells))
     forbidden_state_loops = [

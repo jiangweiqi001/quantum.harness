@@ -881,6 +881,136 @@ def run_validate(
     )
 
 
+def _validate_fig3_shell_selection(
+    metrics: dict[str, Any],
+    arrays: dict[str, Any],
+    *,
+    length: int,
+) -> None:
+    import numpy as np
+
+    failure = "Fig. 3 shell selection metadata is invalid"
+    if metrics.get("primary_length") != length:
+        raise RuntimeError(f"{failure}: stale primary length")
+    expected_plot_convention = {
+        "exact": "black circles, solid line",
+        "fsa": "red crosses, dashed line",
+        "x": "folded FSA shell index n=0..L/2",
+        "y": "squared shell weight, linear",
+    }
+    conventions = metrics.get("plot_conventions", {})
+    if any(
+        conventions.get(f"panel_{panel}") != expected_plot_convention
+        for panel in ("b", "c")
+    ):
+        raise RuntimeError(f"{failure}: plot conventions")
+    selected = metrics.get("selected_panel_states")
+    if not isinstance(selected, list) or len(selected) != 2:
+        raise RuntimeError(f"{failure}: panel records")
+    expected_roles = {
+        "b": "lowest-matched-scar",
+        "c": "negative-adjacent-to-zero",
+    }
+    plotted_count = length // 2 + 1
+    folding = "k=0 inversion-even: n and L-n are symmetry-related"
+    selected_by_panel: dict[str, dict[str, Any]] = {}
+    for record in selected:
+        if not isinstance(record, dict):
+            raise RuntimeError(f"{failure}: panel record type")
+        panel = record.get("panel")
+        if panel not in expected_roles or panel in selected_by_panel:
+            raise RuntimeError(f"{failure}: panel identities")
+        selected_by_panel[panel] = record
+        if (
+            record.get("role") != expected_roles[panel]
+            or record.get("full_fsa_shell_count") != length + 1
+            or record.get("plotted_folded_shell_count") != plotted_count
+            or record.get("folding") != folding
+        ):
+            raise RuntimeError(f"{failure}: role or shell counts")
+        integer_fields = ("exact_index", "fsa_index")
+        if any(
+            isinstance(record.get(field), bool)
+            or not isinstance(record.get(field), int)
+            or record[field] < 0
+            for field in integer_fields
+        ):
+            raise RuntimeError(f"{failure}: selected indices")
+        if record["fsa_index"] >= plotted_count:
+            raise RuntimeError(f"{failure}: FSA index exceeds shell count")
+        numeric_fields = (
+            "exact_energy",
+            "fsa_energy",
+            "match_strength",
+            "zero_tolerance",
+            "exact_weight_sum",
+            "fsa_weight_sum",
+        )
+        if any(
+            isinstance(record.get(field), bool)
+            or not isinstance(record.get(field), (int, float))
+            or not np.isfinite(record[field])
+            for field in numeric_fields
+        ):
+            raise RuntimeError(f"{failure}: nonfinite numerical evidence")
+        if (
+            record["zero_tolerance"] <= 0
+            or record["match_strength"] < 0
+            or record["exact_weight_sum"] <= 0
+            or record["fsa_weight_sum"] <= 0
+            or record["match_strength"] > record["exact_weight_sum"] + 1e-12
+        ):
+            raise RuntimeError(f"{failure}: normalization evidence")
+        if panel == "c" and not (
+            record["exact_energy"] < -record["zero_tolerance"]
+        ):
+            raise RuntimeError(f"{failure}: negative adjacent state")
+
+        prefix = f"panel_{panel}_L{length}_"
+        try:
+            shell = np.asarray(arrays[prefix + "shell"])
+            exact_weights = np.asarray(arrays[prefix + "exact_weights"])
+            fsa_weights = np.asarray(arrays[prefix + "fsa_weights"])
+        except KeyError as error:
+            raise RuntimeError(f"{failure}: missing plotted arrays") from error
+        if (
+            shell.shape != (plotted_count,)
+            or exact_weights.shape != (plotted_count,)
+            or fsa_weights.shape != (plotted_count,)
+            or not np.array_equal(shell, np.arange(plotted_count))
+            or not np.all(np.isfinite(exact_weights))
+            or not np.all(np.isfinite(fsa_weights))
+            or np.any(exact_weights < 0)
+            or np.any(fsa_weights < 0)
+        ):
+            raise RuntimeError(f"{failure}: plotted shell arrays")
+        if not np.isclose(
+            np.sum(exact_weights),
+            record["exact_weight_sum"],
+            atol=1e-12,
+            rtol=1e-10,
+        ) or not np.isclose(
+            np.sum(fsa_weights),
+            record["fsa_weight_sum"],
+            atol=1e-12,
+            rtol=1e-10,
+        ):
+            raise RuntimeError(f"{failure}: normalization mismatch")
+        if not np.isclose(record["fsa_weight_sum"], 1.0, atol=1e-12, rtol=1e-10):
+            raise RuntimeError(f"{failure}: FSA normalization")
+
+    per_length = metrics.get("lengths", {}).get(str(length))
+    if per_length is not None:
+        fsa = per_length.get("fsa", {})
+        if (
+            fsa.get("full_fsa_shell_count") != length + 1
+            or fsa.get("plotted_folded_shell_count") != plotted_count
+            or fsa.get("folding") != folding
+            or fsa.get("selected_states") != selected
+        ):
+            raise RuntimeError(f"{failure}: inconsistent per-length evidence")
+
+
 def _accepted_figure(
     path: Path,
     label: str,
@@ -913,6 +1043,15 @@ def _accepted_figure(
         with np.load(npz_path, allow_pickle=False) as arrays:
             npz_generation_id = arrays["generation_id"].item()
             array_names = tuple(arrays.files)
+            fig3_arrays = (
+                {
+                    name: np.asarray(arrays[name]).copy()
+                    for name in array_names
+                    if name.startswith(("panel_b_", "panel_c_"))
+                }
+                if label == "Fig. 3"
+                else {}
+            )
     except (OSError, ValueError, KeyError) as error:
         raise RuntimeError(f"{label} NPZ generation identity is invalid") from error
     if npz_generation_id != generation_id:
@@ -923,6 +1062,8 @@ def _accepted_figure(
         or assets.get("npz_sha256") != _sha256(npz_path)
     ):
         raise RuntimeError(f"{label} generation asset hash check failed")
+    if label == "Fig. 3":
+        _validate_fig3_shell_selection(metrics, fig3_arrays, length=length)
     if label == "Fig. 4":
         acceptance = metrics["acceptance"]
         if (

@@ -32,6 +32,7 @@ from turner2018_official import (
     load_fig3_fsa,
     load_fig3_overlap,
     load_fig3_pr2_scaling,
+    match_fsa_tower,
     pr2_fsa_averages,
     select_fig3_pr2_states,
 )
@@ -641,6 +642,149 @@ def _configure_overlap_axis(panel: Any) -> None:
     panel.set_ylabel(r"$|\langle E|Z_2\rangle|^2$")
 
 
+def select_fig3_shell_panel_states(
+    *,
+    length: int,
+    energies: np.ndarray,
+    exact_shell_amplitudes: np.ndarray,
+    fsa_hamiltonian_sector: np.ndarray,
+    matched_tower: dict[str, np.ndarray],
+    zero_tolerance: float = 1e-10,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Select paper Fig. 3(b)(c) states and their folded-shell plot data."""
+    if isinstance(length, (bool, np.bool_)) or not isinstance(length, (int, np.integer)):
+        raise TypeError("length must be an even integer")
+    length = int(length)
+    if length < 4 or length % 2:
+        raise ValueError("length must be an even integer >= 4")
+    if (
+        isinstance(zero_tolerance, (bool, np.bool_))
+        or not np.isscalar(zero_tolerance)
+        or not np.isfinite(zero_tolerance)
+        or zero_tolerance <= 0
+    ):
+        raise ValueError("zero_tolerance must be finite and positive")
+    zero_tolerance = float(zero_tolerance)
+
+    raw_energies = np.asarray(energies)
+    if np.iscomplexobj(raw_energies):
+        raise ValueError("energies must be real")
+    energy_values = np.asarray(raw_energies, dtype=np.float64)
+    amplitudes = np.asarray(exact_shell_amplitudes)
+    hamiltonian = np.asarray(fsa_hamiltonian_sector)
+    plotted_shell_count = length // 2 + 1
+    if energy_values.ndim != 1 or energy_values.size == 0:
+        raise ValueError("energies must be a non-empty one-dimensional array")
+    if not np.all(np.isfinite(energy_values)):
+        raise ValueError("energies must be finite")
+    if amplitudes.shape != (plotted_shell_count, energy_values.size):
+        raise ValueError(
+            "exact shell-amplitude shell count and energy columns are invalid"
+        )
+    if not np.all(np.isfinite(amplitudes)):
+        raise ValueError("exact shell weights must be finite")
+    if hamiltonian.shape != (plotted_shell_count, plotted_shell_count):
+        raise ValueError("FSA Hamiltonian shell count is invalid")
+    if np.iscomplexobj(hamiltonian) or not np.all(np.isfinite(hamiltonian)):
+        raise ValueError("FSA Hamiltonian must be real and finite")
+    hamiltonian = np.asarray(hamiltonian, dtype=np.float64)
+    if not np.allclose(hamiltonian, hamiltonian.T, atol=1e-12, rtol=0.0):
+        raise ValueError("FSA Hamiltonian must be symmetric")
+    if not isinstance(matched_tower, dict) or "tower" not in matched_tower:
+        raise ValueError("matched tower selector output is missing")
+
+    fsa_energies, fsa_vectors = np.linalg.eigh(hamiltonian)
+    tower = np.asarray(matched_tower["tower"])
+    if tower.ndim != 1 or tower.size == 0:
+        raise ValueError("matched tower must be non-empty and one-dimensional")
+    if tower.size != plotted_shell_count:
+        raise ValueError("matched tower shell count is invalid")
+    if not np.issubdtype(tower.dtype, np.integer):
+        raise ValueError("matched tower indices must be integers")
+    tower = np.asarray(tower, dtype=np.int64)
+    if np.any(tower < 0) or np.any(tower >= energy_values.size):
+        raise ValueError("matched tower index is out of bounds")
+    if np.unique(tower).size != tower.size:
+        raise ValueError("matched tower must be one-to-one without duplicates")
+    recomputed_tower = match_fsa_tower(amplitudes, fsa_vectors)
+    if not np.array_equal(tower, recomputed_tower):
+        raise ValueError("matched tower selector output is stale or inconsistent")
+    if "sorted_tower" in matched_tower:
+        expected_sorted = tower[np.argsort(energy_values[tower], kind="stable")]
+        recorded_sorted = np.asarray(matched_tower["sorted_tower"])
+        if not np.array_equal(recorded_sorted, expected_sorted):
+            raise ValueError("matched tower sorted indices are stale or inconsistent")
+
+    lowest_position = min(
+        range(tower.size),
+        key=lambda index: (energy_values[tower[index]], int(tower[index])),
+    )
+    negative_positions = [
+        index
+        for index in range(tower.size)
+        if energy_values[tower[index]] < -zero_tolerance
+    ]
+    if not negative_positions:
+        raise ValueError("matched tower has no negative state adjacent to zero")
+    adjacent_position = min(
+        negative_positions,
+        key=lambda index: (
+            abs(energy_values[tower[index]]),
+            int(tower[index]),
+        ),
+    )
+    shell = np.arange(plotted_shell_count, dtype=np.int64)
+    folding = "k=0 inversion-even: n and L-n are symmetry-related"
+
+    def panel_data(panel: str, role: str, fsa_index: int) -> dict[str, Any]:
+        exact_index = int(tower[fsa_index])
+        exact_weights = np.asarray(
+            np.abs(amplitudes[:, exact_index]) ** 2,
+            dtype=np.float64,
+        )
+        fsa_weights = np.asarray(
+            np.abs(fsa_vectors[:, fsa_index]) ** 2,
+            dtype=np.float64,
+        )
+        if not np.all(np.isfinite(exact_weights)) or not np.all(
+            np.isfinite(fsa_weights)
+        ):
+            raise ValueError("selected shell weights must be finite")
+        projection = amplitudes[:, exact_index].conj() @ fsa_vectors[:, fsa_index]
+        match_strength = float(np.abs(projection) ** 2)
+        return {
+            "panel": panel,
+            "role": role,
+            "exact_index": exact_index,
+            "exact_energy": float(energy_values[exact_index]),
+            "fsa_index": int(fsa_index),
+            "fsa_energy": float(fsa_energies[fsa_index]),
+            "match_strength": match_strength,
+            "zero_tolerance": zero_tolerance,
+            "full_fsa_shell_count": length + 1,
+            "plotted_folded_shell_count": plotted_shell_count,
+            "folding": folding,
+            "exact_weight_sum": float(np.sum(exact_weights)),
+            "fsa_weight_sum": float(np.sum(fsa_weights)),
+            "shell": shell.copy(),
+            "exact_weights": exact_weights,
+            "fsa_weights": fsa_weights,
+        }
+
+    return (
+        panel_data("b", "lowest-matched-scar", lowest_position),
+        panel_data("c", "negative-adjacent-to-zero", adjacent_position),
+    )
+
+
+def _shell_panel_metadata(selection: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in selection.items()
+        if key not in {"shell", "exact_weights", "fsa_weights"}
+    }
+
+
 def render_independent_fig3(
     independent_results_root: str | Path,
     *,
@@ -690,69 +834,60 @@ def render_independent_fig3(
         )
     arrays[f"panel_a_L{primary_length}_source"] = np.asarray(INDEPENDENT_SOURCE)
 
-    selector = primary["selector"]
-    special_index = int(
-        selector["special"][
-            np.argmin(np.abs(primary["energies"][selector["special"]]))
-        ]
+    panel_selections = {
+        int(length): select_fig3_shell_panel_states(
+            length=int(length),
+            energies=results[int(length)]["energies"],
+            exact_shell_amplitudes=results[int(length)]["exact_shell_amplitudes"],
+            fsa_hamiltonian_sector=results[int(length)]["fsa_hamiltonian_sector"],
+            matched_tower=results[int(length)]["selector"],
+        )
+        for length in lengths
+    }
+    primary_selections = panel_selections[primary_length]
+    panel_titles = (
+        "lowest scar-tower state",
+        "scar-tower state adjacent to E=0",
     )
-    state_indices = (int(selector["sorted_tower"][0]), special_index)
-    panel_titles = ("matched tower ground state", "matched interior special state")
-    selection_roles = ("tower-ground", "interior-special")
     selected_details: list[dict[str, Any]] = []
-    shell = np.arange(primary["exact_shell_amplitudes"].shape[0])
-    primary_projection = np.abs(
-        primary["exact_shell_amplitudes"].T @ primary["fsa_eigenvectors"]
-    ) ** 2
-    for label, panel, state_index, title, selection_role in zip(
-        ("b", "c"),
+    for panel, selection, title in zip(
         (panel_b, panel_c),
-        state_indices,
+        primary_selections,
         panel_titles,
-        selection_roles,
     ):
-        fsa_index = int(np.flatnonzero(selector["tower"] == state_index)[0])
-        exact_weights = np.abs(
-            primary["exact_shell_amplitudes"][:, state_index]
-        ) ** 2
-        fsa_weights = np.abs(primary["fsa_eigenvectors"][:, fsa_index]) ** 2
-        panel.plot(shell, exact_weights, "o-", markersize=3, label="independent exact")
+        label = selection["panel"]
         panel.plot(
-            shell,
-            fsa_weights,
+            selection["shell"],
+            selection["exact_weights"],
+            "o-",
+            color="black",
+            markersize=3,
+            label="exact",
+        )
+        panel.plot(
+            selection["shell"],
+            selection["fsa_weights"],
             "x--",
-            color="tab:red",
-            label="independent FSA",
+            color="red",
+            label="FSA",
         )
         panel.set_title(
-            f"{title}, E={primary['energies'][state_index]:.3f}"
+            f"L={primary_length} {title}, E={selection['exact_energy']:.3f}"
         )
-        panel.set_xlabel("FSA shell n")
-        panel.set_ylabel("shell weight")
+        panel.set_xlabel("folded FSA shell index n")
+        panel.set_ylabel("squared shell weight")
         panel.legend(fontsize=8)
         for name, values in (
-            ("shell", shell),
-            ("exact_weights", exact_weights),
-            ("fsa_weights", fsa_weights),
+            ("shell", selection["shell"]),
+            ("exact_weights", selection["exact_weights"]),
+            ("fsa_weights", selection["fsa_weights"]),
         ):
             key = f"panel_{label}_L{primary_length}_{name}"
             arrays[key] = np.asarray(values)
             series[key] = _series_entry(
                 INDEPENDENT_SOURCE, panel=label, length=primary_length
             )
-        selected_details.append(
-            {
-                "panel": label,
-                "exact_index": state_index,
-                "exact_energy": float(primary["energies"][state_index]),
-                "fsa_index": fsa_index,
-                "fsa_energy": float(primary["fsa_energies"][fsa_index]),
-                "match_strength": float(
-                    primary_projection[state_index, fsa_index]
-                ),
-                "selection_role": selection_role,
-            }
-        )
+        selected_details.append(_shell_panel_metadata(selection))
 
     independent_other = np.asarray(
         [results[int(length)]["pr2_other"] for length in lengths]
@@ -891,29 +1026,10 @@ def render_independent_fig3(
         match_strengths = projection[
             selected["tower"], np.arange(len(selected["tower"]))
         ]
-        interior_exact = int(
-            selected["special"][
-                np.argmin(np.abs(result["energies"][selected["special"]]))
-            ]
-        )
-        selected_exact_indices = (
-            int(selected["sorted_tower"][0]),
-            interior_exact,
-        )
-        selected_roles = ("tower-ground", "interior-special")
-        selected_states = []
-        for role, exact_index in zip(selected_roles, selected_exact_indices):
-            fsa_index = int(np.flatnonzero(selected["tower"] == exact_index)[0])
-            selected_states.append(
-                {
-                    "selection_role": role,
-                    "exact_index": exact_index,
-                    "exact_energy": float(result["energies"][exact_index]),
-                    "fsa_index": fsa_index,
-                    "fsa_energy": float(result["fsa_energies"][fsa_index]),
-                    "match_strength": float(projection[exact_index, fsa_index]),
-                }
-            )
+        selected_states = [
+            _shell_panel_metadata(selection)
+            for selection in panel_selections[int(length)]
+        ]
         official = official_by_length.get(int(length), {})
         official_pr2_mismatch = None
         if official_scaling is not None:
@@ -946,6 +1062,11 @@ def render_independent_fig3(
                 "fsa_energies": result["fsa_energies"].tolist(),
                 "selected_states": selected_states,
                 "shell_dimensions": list(result["exact_shell_amplitudes"].shape),
+                "full_fsa_shell_count": int(length) + 1,
+                "plotted_folded_shell_count": int(length) // 2 + 1,
+                "folding": (
+                    "k=0 inversion-even: n and L-n are symmetry-related"
+                ),
                 "normalization_convention": "unit-norm projected shells",
                 "sign_convention": "raw persisted real shell amplitudes",
                 "match_strengths": match_strengths.tolist(),
@@ -1030,7 +1151,19 @@ def render_independent_fig3(
                 "y_scale": "log",
                 "nonpositive": "masked",
                 "stored_overlap_values": "unmodified",
-            }
+            },
+            "panel_b": {
+                "exact": "black circles, solid line",
+                "fsa": "red crosses, dashed line",
+                "x": "folded FSA shell index n=0..L/2",
+                "y": "squared shell weight, linear",
+            },
+            "panel_c": {
+                "exact": "black circles, solid line",
+                "fsa": "red crosses, dashed line",
+                "x": "folded FSA shell index n=0..L/2",
+                "y": "squared shell weight, linear",
+            },
         },
         "series": series,
         "selected_panel_states": selected_details,
@@ -1258,36 +1391,45 @@ def run_figure(
             exact_shell_amplitudes=official_fsa["exact_shell_amplitudes"],
             fsa_eigenvectors=official_fsa["vectors"],
         )
-        special_index = official_selected["special"][
-            np.argmin(np.abs(official_energies[official_selected["special"]]))
-        ]
-        state_indices = (official_selected["sorted_tower"][0], special_index)
-        titles = ("matched tower ground state", "matched interior special state")
-        for panel, state_index, title in zip(
-            (panel_b, panel_c), state_indices, titles
+        official_hamiltonian = (
+            official_fsa["vectors"]
+            @ np.diag(official_fsa["energies"])
+            @ official_fsa["vectors"].T
+        )
+        official_panels = select_fig3_shell_panel_states(
+            length=32,
+            energies=official_energies,
+            exact_shell_amplitudes=official_fsa["exact_shell_amplitudes"],
+            fsa_hamiltonian_sector=official_hamiltonian,
+            matched_tower=official_selected,
+        )
+        titles = (
+            "lowest scar-tower state",
+            "scar-tower state adjacent to E=0",
+        )
+        for panel, selection, title in zip(
+            (panel_b, panel_c), official_panels, titles
         ):
-            target_energy = official_energies[state_index]
-            fsa_index = int(np.flatnonzero(
-                official_selected["tower"] == state_index
-            )[0])
-            shell = np.arange(official_fsa["exact_shell_weights"].shape[0])
             panel.plot(
-                shell,
-                official_fsa["exact_shell_weights"][:, state_index],
+                selection["shell"],
+                selection["exact_weights"],
                 "o-",
+                color="black",
                 markersize=3,
-                label="official exact",
+                label="exact",
             )
             panel.plot(
-                shell,
-                np.abs(official_fsa["vectors"][:, fsa_index]) ** 2,
+                selection["shell"],
+                selection["fsa_weights"],
                 "x--",
-                color="black",
-                label="official FSA",
+                color="red",
+                label="FSA",
             )
-            panel.set_title(f"{title}, E={target_energy:.2f}")
-            panel.set_xlabel("FSA shell n")
-            panel.set_ylabel("shell weight")
+            panel.set_title(
+                f"L=32 {title}, E={selection['exact_energy']:.2f}"
+            )
+            panel.set_xlabel("folded FSA shell index n")
+            panel.set_ylabel("squared shell weight")
             panel.legend(fontsize=8)
 
         plot_official_pr2_scaling(panel_d, official_scaling)
