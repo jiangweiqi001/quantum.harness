@@ -1,5 +1,8 @@
 import hashlib
 import json
+import os
+from pathlib import Path
+import shutil
 from zipfile import ZipFile
 
 import h5py
@@ -9,7 +12,9 @@ import pytest
 
 from pxp_ed import constrained_basis, density_wave_state, pxp_hamiltonian
 import turner2018_fig3 as fig3
-from turner2018_l32_server import atomic_write_json, main as server_main
+import turner2018_l32_server as server
+from turner2018_official import pr2_fsa_averages, select_fig3_pr2_states
+from turner2018_l32_server import main as server_main
 from turner2018_fig3 import (
     analyze_spectrum,
     fsa_basis,
@@ -72,18 +77,7 @@ def test_official_pr2_available_sizes_are_unconnected_markers():
     plt.close(figure)
 
 
-def _sha256(path):
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
-
-
-def _rewrite_manifest(path, update):
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    update(payload)
-    atomic_write_json(path, payload)
-
-
-def _synthetic_independent_result(root, length=10):
+def _independent_result(root, length=10):
     output = root / f"L{length}"
     assert server_main(
         [
@@ -99,67 +93,48 @@ def _synthetic_independent_result(root, length=10):
             "4",
         ]
     ) == 0
-
-    with h5py.File(output / "eigensystem.h5", "r+") as handle:
-        energies = handle["eigensystem/energies"]
-        energies[:] = energies[:] + 0.375
-    with h5py.File(output / "observables.h5", "r+") as handle:
-        overlap = handle["observables/overlap_z2"]
-        synthetic_overlap = overlap[()][::-1]
-        overlap[:] = synthetic_overlap
-        pr2 = handle["observables/participation_ratio"]
-        synthetic_pr2 = np.linspace(0.011, 0.029, pr2.size)
-        pr2[:] = synthetic_pr2
-
-    diagonalize_manifest = output / "stages" / "diagonalize.json"
-    _rewrite_manifest(
-        diagonalize_manifest,
-        lambda payload: payload["artifact"].update(
-            sha256=_sha256(output / "eigensystem.h5")
-        ),
+    with h5py.File(output / "eigensystem.h5", "r") as handle:
+        energies = handle["eigensystem/energies"][()]
+    with h5py.File(output / "observables.h5", "r") as handle:
+        observables = {
+            name: handle[f"observables/{name}"][()]
+            for name in (
+                "overlap_z2",
+                "participation_ratio",
+                "exact_shell_amplitudes",
+                "fsa_hamiltonian_sector",
+            )
+        }
+    fsa_energies, fsa_vectors = np.linalg.eigh(
+        observables["fsa_hamiltonian_sector"]
     )
-    observables_manifest = output / "stages" / "observables.json"
-    _rewrite_manifest(
-        observables_manifest,
-        lambda payload: (
-            payload["artifact"].update(sha256=_sha256(output / "observables.h5")),
-            payload["inputs"].update(
-                diagonalize=_sha256(diagonalize_manifest)
-            ),
-        ),
+    selector = select_fig3_pr2_states(
+        energies=energies,
+        exact_shell_amplitudes=observables["exact_shell_amplitudes"],
+        fsa_eigenvectors=fsa_vectors,
     )
-    validation_path = output / "validation" / "metrics.json"
-    validation = json.loads(validation_path.read_text(encoding="utf-8"))
-    validation["validated_stage_sha256"]["diagonalize"] = _sha256(
-        output / "eigensystem.h5"
+    other_mean, special_mean = pr2_fsa_averages(
+        energies=energies,
+        pr2=observables["participation_ratio"],
+        exact_shell_amplitudes=observables["exact_shell_amplitudes"],
+        fsa_eigenvectors=fsa_vectors,
     )
-    validation["validated_stage_sha256"]["observables"] = _sha256(
-        output / "observables.h5"
-    )
-    atomic_write_json(validation_path, validation)
-    validate_manifest = output / "stages" / "validate.json"
-    _rewrite_manifest(
-        validate_manifest,
-        lambda payload: (
-            payload["artifact"].update(sha256=_sha256(validation_path)),
-            payload["inputs"].update(
-                diagonalize=_sha256(diagonalize_manifest),
-                observables=_sha256(observables_manifest),
-            ),
-        ),
-    )
-    return output, synthetic_overlap, synthetic_pr2
+    return output, {
+        "energies": energies,
+        **observables,
+        "fsa_energies": fsa_energies,
+        "fsa_vectors": fsa_vectors,
+        "selector": selector,
+        "other_mean": other_mean,
+        "special_mean": special_mean,
+    }
 
 
 def test_independent_renderer_uses_only_validated_artifacts_for_generated_series(
     tmp_path, monkeypatch
 ):
     independent_root = tmp_path / "independent"
-    output, synthetic_overlap, synthetic_pr2 = _synthetic_independent_result(
-        independent_root
-    )
-    with h5py.File(output / "eigensystem.h5", "r") as handle:
-        synthetic_energies = handle["eigensystem/energies"][()]
+    _output, independent = _independent_result(independent_root)
 
     official_root = tmp_path / "official"
     official_root.mkdir()
@@ -173,8 +148,8 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
         archive.writestr("oneel_periodic_N10_k0_p0.dat", "synthetic")
     with ZipFile(official_root / "eigendecomposition.zip", "w") as archive:
         archive.writestr("eigs_periodic_N10_k0_p0.h5", b"synthetic")
-    official_energies = synthetic_energies + 9.0
-    official_overlap = synthetic_overlap + 7.0
+    official_energies = independent["energies"] + 9.0
+    official_overlap = independent["overlap_z2"] + 7.0
     monkeypatch.setattr(
         fig3,
         "load_fig3_overlap",
@@ -212,10 +187,10 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
     assert figure_path.name == "fig3_independent_L10.png"
     with np.load(figure_path.with_suffix(".npz"), allow_pickle=False) as sidecar:
         np.testing.assert_array_equal(
-            sidecar["panel_a_L10_energies"], synthetic_energies
+            sidecar["panel_a_L10_energies"], independent["energies"]
         )
         np.testing.assert_array_equal(
-            sidecar["panel_a_L10_overlap_z2"], synthetic_overlap
+            sidecar["panel_a_L10_overlap_z2"], independent["overlap_z2"]
         )
         assert not np.array_equal(
             sidecar["panel_a_L10_energies"], official_energies
@@ -226,14 +201,54 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
         assert sidecar["panel_a_L10_source"].item() == "independent-ed"
         assert sidecar["panel_d_source"].item() == "independent-ed"
         assert sidecar["official_L10_source"].item() == "official-doi"
+        sidecar_generation = sidecar["generation_id"].item()
+        np.testing.assert_allclose(
+            sidecar["panel_d_other"], [independent["other_mean"]]
+        )
+        np.testing.assert_allclose(
+            sidecar["panel_d_special"], [independent["special_mean"]]
+        )
+        selector = independent["selector"]
+        panel_indices = (
+            int(selector["sorted_tower"][0]),
+            int(
+                selector["special"][
+                    np.argmin(
+                        np.abs(independent["energies"][selector["special"]])
+                    )
+                ]
+            ),
+        )
+        for panel, exact_index in zip(("b", "c"), panel_indices):
+            fsa_index = int(
+                np.flatnonzero(selector["tower"] == exact_index)[0]
+            )
+            np.testing.assert_allclose(
+                sidecar[f"panel_{panel}_L10_exact_weights"],
+                np.abs(
+                    independent["exact_shell_amplitudes"][:, exact_index]
+                )
+                ** 2,
+            )
+            np.testing.assert_allclose(
+                sidecar[f"panel_{panel}_L10_fsa_weights"],
+                np.abs(independent["fsa_vectors"][:, fsa_index]) ** 2,
+            )
 
     metrics = json.loads(figure_path.with_suffix(".json").read_text())
+    assert metrics["generation_id"] == sidecar_generation
+    assert metrics["generation_assets"]["png_sha256"] == hashlib.sha256(
+        figure_path.read_bytes()
+    ).hexdigest()
+    assert metrics["generation_assets"]["npz_sha256"] == hashlib.sha256(
+        figure_path.with_suffix(".npz").read_bytes()
+    ).hexdigest()
     assert metrics["source"] == "independent-ed"
     assert metrics["lengths"]["10"]["overlap_sum"] == pytest.approx(
-        float(np.sum(synthetic_overlap))
+        float(np.sum(independent["overlap_z2"]))
     )
     assert metrics["lengths"]["10"]["pr2"]["all_values_sha256"] == hashlib.sha256(
-        synthetic_pr2.tobytes()
+        independent["participation_ratio"].tobytes()
     ).hexdigest()
     assert all(
         series["source"] == "independent-ed"
@@ -248,12 +263,28 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
     mismatch = metrics["lengths"]["10"]["official_mismatch"]
     assert mismatch["energies_max_abs"] == pytest.approx(9.0)
     assert mismatch["overlap_max_abs"] == pytest.approx(7.0)
+    fsa = metrics["lengths"]["10"]["fsa"]
+    assert fsa["shell_dimensions"] == [6, 14]
+    assert fsa["normalization_convention"] == "unit-norm projected shells"
+    assert fsa["sign_convention"] == "raw persisted real shell amplitudes"
+    assert len(fsa["match_strengths"]) == 6
+    assert all(value > 0 for value in fsa["match_strengths"])
+    assert {
+        "basis.npz",
+        "hamiltonian.csr.npz",
+        "eigensystem.h5",
+        "observables.h5",
+    }.issubset(metrics["lengths"]["10"]["source_hashes"])
+    assert {
+        state["selection_role"] for state in metrics["selected_panel_states"]
+    } == {"tower-ground", "interior-special"}
+    assert "near E=0" not in json.dumps(metrics)
 
 
 def test_missing_independent_size_is_recorded_without_official_substitution(tmp_path):
     independent_root = tmp_path / "independent"
-    _synthetic_independent_result(independent_root, length=10)
-    _synthetic_independent_result(independent_root, length=14)
+    _independent_result(independent_root, length=10)
+    _independent_result(independent_root, length=14)
 
     figure_path = fig3.render_independent_fig3(
         independent_root,
@@ -265,7 +296,7 @@ def test_missing_independent_size_is_recorded_without_official_substitution(tmp_
         np.testing.assert_array_equal(sidecar["panel_d_lengths"], [10, 14])
         assert not any(name.startswith("official_") for name in sidecar.files)
     metrics = json.loads(figure_path.with_suffix(".json").read_text())
-    assert metrics["missing_independent_sizes"] == [12]
+    assert metrics["missing_lengths_within_independent_range"] == [12]
     assert metrics["available_independent_lengths"] == [10, 14]
 
 
@@ -273,7 +304,7 @@ def test_official_overlap_overlay_is_skipped_when_requested_member_is_absent(
     tmp_path, monkeypatch
 ):
     independent_root = tmp_path / "independent"
-    _synthetic_independent_result(independent_root, length=10)
+    _independent_result(independent_root, length=10)
     official_root = tmp_path / "official"
     official_root.mkdir()
     with ZipFile(official_root / "overlaps_with_Neel_state.zip", "w") as archive:
@@ -296,6 +327,156 @@ def test_official_overlap_overlay_is_skipped_when_requested_member_is_absent(
 
     with np.load(path.with_suffix(".npz"), allow_pickle=False) as sidecar:
         assert not any(name.startswith("official_L10") for name in sidecar.files)
+
+
+def test_renderer_rejects_stale_current_execution_fingerprint(tmp_path, monkeypatch):
+    independent_root = tmp_path / "independent"
+    _independent_result(independent_root)
+    changed = json.loads(json.dumps(server.build_execution_fingerprint()))
+    changed["sources"]["turner2018_fig3.py"] = "f" * 64
+    monkeypatch.setattr(server, "build_execution_fingerprint", lambda: changed)
+
+    with pytest.raises(RuntimeError, match="execution fingerprint"):
+        fig3.render_independent_fig3(
+            independent_root,
+            output_dir=tmp_path / "figure",
+            official_data_dir=None,
+        )
+
+
+def test_renderer_consumes_the_exact_validated_hdf5_handles(tmp_path, monkeypatch):
+    independent_root = tmp_path / "independent"
+    output, independent = _independent_result(independent_root)
+    replacement = tmp_path / "replacement-observables.h5"
+    shutil.copyfile(output / "observables.h5", replacement)
+    with h5py.File(replacement, "r+") as handle:
+        overlap = handle["observables/overlap_z2"]
+        overlap[:] = np.roll(overlap[()], 1)
+
+    original_require_stage = server.require_stage
+    swapped = False
+
+    def swap_after_validation(directory, stage, validation_cache=None):
+        nonlocal swapped
+        result = original_require_stage(directory, stage, validation_cache)
+        if stage == "validate" and not swapped:
+            os.replace(replacement, output / "observables.h5")
+            swapped = True
+        return result
+
+    monkeypatch.setattr(server, "require_stage", swap_after_validation)
+    path = fig3.render_independent_fig3(
+        independent_root,
+        output_dir=tmp_path / "figure",
+        official_data_dir=None,
+    )
+
+    with np.load(path.with_suffix(".npz"), allow_pickle=False) as sidecar:
+        np.testing.assert_array_equal(
+            sidecar["panel_a_L10_overlap_z2"],
+            independent["overlap_z2"],
+        )
+
+
+def test_generation_publish_failure_restores_all_previous_files(
+    tmp_path, monkeypatch
+):
+    independent_root = tmp_path / "independent"
+    _independent_result(independent_root)
+    figure_dir = tmp_path / "figure"
+    path = fig3.render_independent_fig3(
+        independent_root,
+        output_dir=figure_dir,
+        official_data_dir=None,
+    )
+    targets = (path, path.with_suffix(".npz"), path.with_suffix(".json"))
+    before = {target: target.read_bytes() for target in targets}
+    original_replace = fig3.os.replace
+
+    def fail_json_publish(source, destination):
+        if Path(destination) == path.with_suffix(".json"):
+            raise OSError("injected JSON publish failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(fig3.os, "replace", fail_json_publish)
+    with pytest.raises(OSError, match="JSON publish failure"):
+        fig3.render_independent_fig3(
+            independent_root,
+            output_dir=figure_dir,
+            official_data_dir=None,
+        )
+
+    assert {target: target.read_bytes() for target in targets} == before
+    assert not list(figure_dir.glob("*.partial*"))
+    assert not list(figure_dir.glob("*.backup"))
+
+
+def test_first_generation_publish_failure_leaves_no_generation(tmp_path, monkeypatch):
+    independent_root = tmp_path / "independent"
+    _independent_result(independent_root)
+    figure_dir = tmp_path / "figure"
+    expected = figure_dir / "fig3_independent_L10.png"
+    original_replace = fig3.os.replace
+
+    def fail_json_publish(source, destination):
+        if Path(destination) == expected.with_suffix(".json"):
+            raise OSError("injected first JSON publish failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(fig3.os, "replace", fail_json_publish)
+    with pytest.raises(OSError, match="first JSON publish failure"):
+        fig3.render_independent_fig3(
+            independent_root,
+            output_dir=figure_dir,
+            official_data_dir=None,
+        )
+
+    assert not expected.exists()
+    assert not expected.with_suffix(".npz").exists()
+    assert not expected.with_suffix(".json").exists()
+    assert not list(figure_dir.glob("*.partial*"))
+    assert not list(figure_dir.glob("*.backup"))
+
+
+def test_generation_backup_failure_preserves_previous_files(tmp_path, monkeypatch):
+    independent_root = tmp_path / "independent"
+    _independent_result(independent_root)
+    figure_dir = tmp_path / "figure"
+    path = fig3.render_independent_fig3(
+        independent_root,
+        output_dir=figure_dir,
+        official_data_dir=None,
+    )
+    targets = (path, path.with_suffix(".npz"), path.with_suffix(".json"))
+    before = {target: target.read_bytes() for target in targets}
+    original_link = fig3.os.link
+    calls = 0
+
+    def fail_second_backup(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected backup failure")
+        return original_link(source, destination)
+
+    monkeypatch.setattr(fig3.os, "link", fail_second_backup)
+    with pytest.raises(OSError, match="backup failure"):
+        fig3.render_independent_fig3(
+            independent_root,
+            output_dir=figure_dir,
+            official_data_dir=None,
+        )
+
+    assert {target: target.read_bytes() for target in targets} == before
+    assert not list(figure_dir.glob("*.partial*"))
+    assert not list(figure_dir.glob("*.backup"))
+
+
+def test_length_and_independent_results_root_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        fig3.build_parser().parse_args(
+            ["--length", "10", "--independent-results-root", "results"]
+        )
 
 
 def test_legacy_small_l_renderer_still_writes_analyze_spectrum_arrays(tmp_path):

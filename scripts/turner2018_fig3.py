@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import os
 from pathlib import Path
 from typing import Any
+import uuid
 from zipfile import BadZipFile, ZipFile
 
 import h5py
@@ -55,20 +57,99 @@ def _sha256(path: Path) -> str:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+def _fsync_parent(path: Path) -> None:
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _unlink_durable(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_parent(path)
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _hash_open_file(handle: Any) -> str:
+    position = handle.tell()
+    handle.seek(0)
+    digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    handle.seek(position)
+    return digest
+
+
+def _read_open_file(handle: Any) -> bytes:
+    position = handle.tell()
+    handle.seek(0)
+    payload = handle.read()
+    handle.seek(position)
+    return payload
+
+
+def _write_json_partial(path: Path, payload: dict[str, Any]) -> Path:
     partial = path.with_name(path.name + ".partial")
-    partial.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(partial, path)
+    encoded = (
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    with partial.open("wb") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return partial
 
 
-def _atomic_npz(path: Path, arrays: dict[str, np.ndarray]) -> None:
+def _write_npz_partial(path: Path, arrays: dict[str, np.ndarray]) -> Path:
     partial = path.with_name(path.name + ".partial")
     with partial.open("wb") as handle:
         np.savez(handle, **arrays)
-    os.replace(partial, path)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return partial
+
+
+def _publish_generation(partials: dict[Path, Path]) -> None:
+    """Publish one three-file generation or durably restore its predecessor."""
+    targets = tuple(partials)
+    existing = [target.is_file() for target in targets]
+    if any(existing) and not all(existing):
+        raise RuntimeError("refusing to replace an incomplete prior Fig. 3 generation")
+    backups = {target: target.with_name(target.name + ".backup") for target in targets}
+    for backup in backups.values():
+        _unlink_durable(backup)
+    if all(existing):
+        try:
+            for target, backup in backups.items():
+                os.link(target, backup)
+                _fsync_parent(backup)
+        except Exception:
+            for backup in backups.values():
+                _unlink_durable(backup)
+            raise
+    try:
+        for target, partial in partials.items():
+            os.replace(partial, target)
+            _fsync_parent(target)
+    except Exception:
+        for target, had_previous in zip(targets, existing):
+            backup = backups[target]
+            _unlink_durable(target)
+            if had_previous and backup.is_file():
+                os.link(backup, target)
+                _fsync_parent(target)
+        raise
+    finally:
+        for partial in partials.values():
+            _unlink_durable(partial)
+        for backup in backups.values():
+            _unlink_durable(backup)
 
 
 def _maximum_mismatch(left: np.ndarray, right: np.ndarray) -> float | None:
@@ -112,89 +193,212 @@ def _scientific_dimensions(
 
 def _load_independent_length(directory: Path) -> dict[str, Any]:
     """Load one current Task 6 result without materializing eigenvectors."""
-    from turner2018_l32_server import require_stage
-
-    cache: dict[str, dict[str, Any]] = {}
-    validate_manifest = require_stage(directory, "validate", cache)
-    diagonalize_manifest = cache["diagonalize"]
-    observables_manifest = cache["observables"]
-    plan = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-    model = plan.get("model", {})
-    if (
-        model.get("hamiltonian") != EXPECTED_MODEL
-        or model.get("boundary") != "periodic"
-        or model.get("momentum") != 0
-        or model.get("inversion") != "even"
-    ):
-        raise RuntimeError(f"scientific model attributes are invalid in {directory}")
-    length = model.get("length")
-    if not isinstance(length, int) or length < 4 or length % 2:
-        raise RuntimeError(f"scientific length is invalid in {directory}")
-
-    validation = json.loads(
-        (directory / "validation" / "metrics.json").read_text(encoding="utf-8")
-    )
-    if validation.get("passed") is not True or validation.get("length") != length:
-        raise RuntimeError(f"scientific validation did not pass for L={length}")
-    validated_hashes = validation.get("validated_stage_sha256", {})
-    for stage, manifest in (
-        ("diagonalize", diagonalize_manifest),
-        ("observables", observables_manifest),
-    ):
-        if validated_hashes.get(stage) != manifest["artifact"]["sha256"]:
-            raise RuntimeError(
-                f"validation source hash does not match stage={stage} for L={length}"
-            )
-    full_dimension, sector_dimension = _scientific_dimensions(
-        directory, validation, plan
+    from turner2018_l32_server import (
+        _fingerprint_sha256,
+        build_execution_fingerprint,
+        require_stage,
     )
 
-    with h5py.File(directory / "eigensystem.h5", "r") as handle:
-        energies_dataset = handle["eigensystem/energies"]
-        vectors = handle["eigensystem/vectors"]
-        expected_vector_metadata = (
-            vectors.shape == (sector_dimension, sector_dimension)
-            and vectors.dtype == np.float64
-            and vectors.chunks == (sector_dimension, 1)
+    manifest_stages = (
+        "plan",
+        "basis",
+        "hamiltonian",
+        "diagonalize",
+        "observables",
+        "validate",
+    )
+    with ExitStack() as stack:
+        plan_handle = stack.enter_context((directory / "manifest.json").open("rb"))
+        validation_handle = stack.enter_context(
+            (directory / "validation" / "metrics.json").open("rb")
         )
-        if not expected_vector_metadata:
-            raise RuntimeError(f"eigenvector metadata is invalid for L={length}")
-        energies = energies_dataset[()]
-        eigenvector_metadata = {
-            "shape": list(vectors.shape),
-            "dtype": str(vectors.dtype),
-            "chunks": list(vectors.chunks or ()),
-            "access": "metadata-only",
+        basis_handle = stack.enter_context((directory / "basis.npz").open("rb"))
+        hamiltonian_handle = stack.enter_context(
+            (directory / "hamiltonian.csr.npz").open("rb")
+        )
+        eigensystem_handle = stack.enter_context(
+            (directory / "eigensystem.h5").open("rb")
+        )
+        observables_handle = stack.enter_context(
+            (directory / "observables.h5").open("rb")
+        )
+        stage_handles = {
+            stage: stack.enter_context(
+                (directory / "stages" / f"{stage}.json").open("rb")
+            )
+            for stage in manifest_stages
         }
+        stage_bytes = {
+            stage: _read_open_file(handle)
+            for stage, handle in stage_handles.items()
+        }
+        stage_hashes = {
+            stage: hashlib.sha256(payload).hexdigest()
+            for stage, payload in stage_bytes.items()
+        }
+        plan_bytes = _read_open_file(plan_handle)
+        validation_bytes = _read_open_file(validation_handle)
 
-    expected_shells = length // 2 + 1
-    expected_shapes = {
-        "overlap_z2": (sector_dimension,),
-        "participation_ratio": (sector_dimension,),
-        "exact_shell_amplitudes": (expected_shells, sector_dimension),
-        "fsa_shell_vectors_sector": (expected_shells, sector_dimension),
-        "fsa_hamiltonian_sector": (expected_shells, expected_shells),
-        "fsa_beta_full_chain": (length,),
-    }
-    observables: dict[str, np.ndarray] = {}
-    with h5py.File(directory / "observables.h5", "r") as handle:
-        group = handle["observables"]
-        if set(group.keys()) != REQUIRED_OBSERVABLES:
-            raise RuntimeError(f"observable dataset set is invalid for L={length}")
-        metadata = json.loads(group.attrs["validation_metadata"])
-        if (
-            metadata.get("eigenvector_access") != "column-chunked"
-            or metadata.get("finite_columns_checked") != sector_dimension
-            or metadata.get("residual_columns_checked") != sector_dimension
-        ):
-            raise RuntimeError(f"observable scientific attributes are invalid for L={length}")
-        for name, shape in expected_shapes.items():
-            dataset = group[name]
-            if dataset.shape != shape or dataset.dtype != np.float64:
+        cache: dict[str, dict[str, Any]] = {}
+        require_stage(directory, "plan", cache)
+        validate_manifest = require_stage(directory, "validate", cache)
+        for stage, payload in stage_bytes.items():
+            if json.loads(payload) != cache[stage]:
                 raise RuntimeError(
-                    f"observable {name} metadata is invalid for L={length}"
+                    f"stage manifest changed during validation: stage={stage}"
                 )
-            observables[name] = dataset[()]
+        diagonalize_manifest = cache["diagonalize"]
+        observables_manifest = cache["observables"]
+        if _hash_open_file(plan_handle) != cache["plan"]["artifact"]["sha256"]:
+            raise RuntimeError("validated plan bytes do not match the open plan handle")
+        if _hash_open_file(validation_handle) != validate_manifest["artifact"]["sha256"]:
+            raise RuntimeError(
+                "validated metrics bytes do not match the open validation handle"
+            )
+        if _hash_open_file(basis_handle) != cache["basis"]["artifact"]["sha256"]:
+            raise RuntimeError(
+                "validated basis bytes do not match the open NPZ handle"
+            )
+        if (
+            _hash_open_file(hamiltonian_handle)
+            != cache["hamiltonian"]["artifact"]["sha256"]
+        ):
+            raise RuntimeError(
+                "validated Hamiltonian bytes do not match the open NPZ handle"
+            )
+        if (
+            _hash_open_file(eigensystem_handle)
+            != diagonalize_manifest["artifact"]["sha256"]
+        ):
+            raise RuntimeError(
+                "validated eigensystem bytes do not match the open HDF5 handle"
+            )
+        if (
+            _hash_open_file(observables_handle)
+            != observables_manifest["artifact"]["sha256"]
+        ):
+            raise RuntimeError(
+                "validated observables bytes do not match the open HDF5 handle"
+            )
+
+        plan = json.loads(plan_bytes)
+        current_fingerprint = build_execution_fingerprint()
+        if (
+            plan.get("execution_fingerprint") != current_fingerprint
+            or plan.get("execution_fingerprint_sha256")
+            != _fingerprint_sha256(current_fingerprint)
+        ):
+            raise RuntimeError("stored plan execution fingerprint is not current")
+        model = plan.get("model", {})
+        if (
+            model.get("hamiltonian") != EXPECTED_MODEL
+            or model.get("boundary") != "periodic"
+            or model.get("momentum") != 0
+            or model.get("inversion") != "even"
+        ):
+            raise RuntimeError(
+                f"scientific model attributes are invalid in {directory}"
+            )
+        length = model.get("length")
+        if not isinstance(length, int) or length < 4 or length % 2:
+            raise RuntimeError(f"scientific length is invalid in {directory}")
+
+        validation = json.loads(validation_bytes)
+        if validation.get("passed") is not True or validation.get("length") != length:
+            raise RuntimeError(f"scientific validation did not pass for L={length}")
+        validated_hashes = validation.get("validated_stage_sha256", {})
+        for stage, manifest in (
+            ("diagonalize", diagonalize_manifest),
+            ("observables", observables_manifest),
+        ):
+            if validated_hashes.get(stage) != manifest["artifact"]["sha256"]:
+                raise RuntimeError(
+                    f"validation source hash does not match stage={stage} for L={length}"
+                )
+        full_dimension, sector_dimension = _scientific_dimensions(
+            directory, validation, plan
+        )
+
+        eigensystem_handle.seek(0)
+        with h5py.File(eigensystem_handle, "r") as handle:
+            energies_dataset = handle["eigensystem/energies"]
+            vectors = handle["eigensystem/vectors"]
+            expected_vector_metadata = (
+                vectors.shape == (sector_dimension, sector_dimension)
+                and vectors.dtype == np.float64
+                and vectors.chunks == (sector_dimension, 1)
+            )
+            if not expected_vector_metadata:
+                raise RuntimeError(f"eigenvector metadata is invalid for L={length}")
+            energies = energies_dataset[()]
+            eigenvector_metadata = {
+                "shape": list(vectors.shape),
+                "dtype": str(vectors.dtype),
+                "chunks": list(vectors.chunks or ()),
+                "access": "metadata-only",
+            }
+
+        expected_shells = length // 2 + 1
+        expected_shapes = {
+            "overlap_z2": (sector_dimension,),
+            "participation_ratio": (sector_dimension,),
+            "exact_shell_amplitudes": (expected_shells, sector_dimension),
+            "fsa_shell_vectors_sector": (expected_shells, sector_dimension),
+            "fsa_hamiltonian_sector": (expected_shells, expected_shells),
+            "fsa_beta_full_chain": (length,),
+        }
+        observables: dict[str, np.ndarray] = {}
+        observables_handle.seek(0)
+        with h5py.File(observables_handle, "r") as handle:
+            group = handle["observables"]
+            if set(group.keys()) != REQUIRED_OBSERVABLES:
+                raise RuntimeError(f"observable dataset set is invalid for L={length}")
+            metadata = json.loads(group.attrs["validation_metadata"])
+            if (
+                metadata.get("eigenvector_access") != "column-chunked"
+                or metadata.get("finite_columns_checked") != sector_dimension
+                or metadata.get("residual_columns_checked") != sector_dimension
+            ):
+                raise RuntimeError(
+                    f"observable scientific attributes are invalid for L={length}"
+                )
+            for name, shape in expected_shapes.items():
+                dataset = group[name]
+                if dataset.shape != shape or dataset.dtype != np.float64:
+                    raise RuntimeError(
+                        f"observable {name} metadata is invalid for L={length}"
+                    )
+                observables[name] = dataset[()]
+
+        stable_hashes = {
+            "basis.npz": _hash_open_file(basis_handle),
+            "hamiltonian.csr.npz": _hash_open_file(hamiltonian_handle),
+            "eigensystem.h5": _hash_open_file(eigensystem_handle),
+            "observables.h5": _hash_open_file(observables_handle),
+            "validation_metrics": _hash_open_file(validation_handle),
+            **{
+                f"{stage}_manifest": _hash_open_file(handle)
+                for stage, handle in stage_handles.items()
+            },
+        }
+        if stable_hashes["eigensystem.h5"] != diagonalize_manifest["artifact"]["sha256"]:
+            raise RuntimeError("eigensystem changed while it was consumed")
+        if stable_hashes["observables.h5"] != observables_manifest["artifact"]["sha256"]:
+            raise RuntimeError("observables changed while they were consumed")
+        if stable_hashes["basis.npz"] != cache["basis"]["artifact"]["sha256"]:
+            raise RuntimeError("basis changed while its snapshot was held")
+        if (
+            stable_hashes["hamiltonian.csr.npz"]
+            != cache["hamiltonian"]["artifact"]["sha256"]
+        ):
+            raise RuntimeError("Hamiltonian changed while its snapshot was held")
+        if stable_hashes["validation_metrics"] != validate_manifest["artifact"]["sha256"]:
+            raise RuntimeError("validation metrics changed while they were consumed")
+        for stage in manifest_stages:
+            if stable_hashes[f"{stage}_manifest"] != stage_hashes[stage]:
+                raise RuntimeError(
+                    f"stage manifest changed while consumed: stage={stage}"
+                )
 
     if energies.shape != (sector_dimension,) or np.any(np.diff(energies) < 0):
         raise RuntimeError(f"energy array is invalid for L={length}")
@@ -233,10 +437,8 @@ def _load_independent_length(directory: Path) -> dict[str, Any]:
         "pr2_special": special_pr2,
         "overlap_sum": overlap_sum,
         "source_hashes": {
-            "eigensystem.h5": diagonalize_manifest["artifact"]["sha256"],
-            "observables.h5": observables_manifest["artifact"]["sha256"],
-            "validate_manifest": _sha256(directory / "stages" / "validate.json"),
-            "validation_metrics": validate_manifest["artifact"]["sha256"],
+            **stable_hashes,
+            "execution_fingerprint": plan["execution_fingerprint_sha256"],
         },
         "eigenvector_metadata": eigenvector_metadata,
     }
@@ -287,6 +489,7 @@ def render_independent_fig3(
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = f"fig3_independent_L{primary_length}"
     path = output_dir / f"{stem}.png"
+    generation_id = str(uuid.uuid4())
     arrays: dict[str, np.ndarray] = {}
     series: dict[str, dict[str, Any]] = {}
 
@@ -327,11 +530,19 @@ def render_independent_fig3(
         ]
     )
     state_indices = (int(selector["sorted_tower"][0]), special_index)
-    panel_titles = ("matched tower ground state", "matched special state near E=0")
+    panel_titles = ("matched tower ground state", "matched interior special state")
+    selection_roles = ("tower-ground", "interior-special")
     selected_details: list[dict[str, Any]] = []
     shell = np.arange(primary["exact_shell_amplitudes"].shape[0])
-    for label, panel, state_index, title in zip(
-        ("b", "c"), (panel_b, panel_c), state_indices, panel_titles
+    primary_projection = np.abs(
+        primary["exact_shell_amplitudes"].T @ primary["fsa_eigenvectors"]
+    ) ** 2
+    for label, panel, state_index, title, selection_role in zip(
+        ("b", "c"),
+        (panel_b, panel_c),
+        state_indices,
+        panel_titles,
+        selection_roles,
     ):
         fsa_index = int(np.flatnonzero(selector["tower"] == state_index)[0])
         exact_weights = np.abs(
@@ -369,6 +580,10 @@ def render_independent_fig3(
                 "exact_energy": float(primary["energies"][state_index]),
                 "fsa_index": fsa_index,
                 "fsa_energy": float(primary["fsa_energies"][fsa_index]),
+                "match_strength": float(
+                    primary_projection[state_index, fsa_index]
+                ),
+                "selection_role": selection_role,
             }
         )
 
@@ -500,14 +715,43 @@ def render_independent_fig3(
         )
     figure.tight_layout()
     image_partial = path.with_name(path.stem + ".partial.png")
-    figure.savefig(image_partial, dpi=180)
+    figure.savefig(image_partial, dpi=180, format="png")
     plt.close(figure)
-    os.replace(image_partial, path)
+    _fsync_file(image_partial)
 
     per_length: dict[str, Any] = {}
     for length in lengths:
         result = results[int(length)]
         selected = result["selector"]
+        projection = np.abs(
+            result["exact_shell_amplitudes"].T @ result["fsa_eigenvectors"]
+        ) ** 2
+        match_strengths = projection[
+            selected["tower"], np.arange(len(selected["tower"]))
+        ]
+        interior_exact = int(
+            selected["special"][
+                np.argmin(np.abs(result["energies"][selected["special"]]))
+            ]
+        )
+        selected_exact_indices = (
+            int(selected["sorted_tower"][0]),
+            interior_exact,
+        )
+        selected_roles = ("tower-ground", "interior-special")
+        selected_states = []
+        for role, exact_index in zip(selected_roles, selected_exact_indices):
+            fsa_index = int(np.flatnonzero(selected["tower"] == exact_index)[0])
+            selected_states.append(
+                {
+                    "selection_role": role,
+                    "exact_index": exact_index,
+                    "exact_energy": float(result["energies"][exact_index]),
+                    "fsa_index": fsa_index,
+                    "fsa_energy": float(result["fsa_energies"][fsa_index]),
+                    "match_strength": float(projection[exact_index, fsa_index]),
+                }
+            )
         official = official_by_length.get(int(length), {})
         official_pr2_mismatch = None
         if official_scaling is not None:
@@ -533,12 +777,30 @@ def render_independent_fig3(
             "overlap_sum": result["overlap_sum"],
             "fsa": {
                 "match_exact_indices": selected["tower"].tolist(),
+                "match_fsa_indices": list(range(len(selected["tower"]))),
                 "match_exact_energies": result["energies"][
                     selected["tower"]
                 ].tolist(),
                 "fsa_energies": result["fsa_energies"].tolist(),
+                "selected_states": selected_states,
+                "shell_dimensions": list(result["exact_shell_amplitudes"].shape),
+                "normalization_convention": "unit-norm projected shells",
+                "sign_convention": "raw persisted real shell amplitudes",
+                "match_strengths": match_strengths.tolist(),
                 "shell_amplitudes_sha256": hashlib.sha256(
                     result["exact_shell_amplitudes"].tobytes()
+                ).hexdigest(),
+                "shell_vectors_sha256": hashlib.sha256(
+                    result["fsa_shell_vectors_sector"].tobytes()
+                ).hexdigest(),
+                "fsa_hamiltonian_sha256": hashlib.sha256(
+                    result["fsa_hamiltonian_sector"].tobytes()
+                ).hexdigest(),
+                "fsa_beta_sha256": hashlib.sha256(
+                    result["fsa_beta_full_chain"].tobytes()
+                ).hexdigest(),
+                "match_indices_sha256": hashlib.sha256(
+                    selected["tower"].astype(np.int64).tobytes()
                 ).hexdigest(),
                 "selector": "turner2018_official.select_fig3_pr2_states",
                 "tie_rtol": 1e-8,
@@ -591,8 +853,16 @@ def render_independent_fig3(
         "independent_results_root": str(Path(independent_results_root)),
         "primary_length": primary_length,
         "available_independent_lengths": lengths.tolist(),
-        "missing_independent_sizes": missing,
-        "missing_size_policy": "never connected or substituted from official data",
+        "missing_lengths_within_independent_range": missing,
+        "missing_length_range": (
+            {"start": int(lengths[0]), "stop": int(lengths[-1]), "step": 2}
+            if len(lengths) > 1
+            else None
+        ),
+        "missing_size_policy": (
+            "reports only even gaps between the minimum and maximum independent "
+            "lengths; never connects or substitutes official data"
+        ),
         "series": series,
         "selected_panel_states": selected_details,
         "lengths": per_length,
@@ -606,9 +876,26 @@ def render_independent_fig3(
             "validated_lengths": lengths.tolist(),
             "generated_source": INDEPENDENT_SOURCE,
         },
+        "generation_id": generation_id,
     }
-    _atomic_npz(path.with_suffix(".npz"), arrays)
-    _atomic_json(path.with_suffix(".json"), metrics)
+    arrays["generation_id"] = np.asarray(generation_id)
+    npz_path = path.with_suffix(".npz")
+    json_path = path.with_suffix(".json")
+    partials = {path: image_partial}
+    try:
+        npz_partial = _write_npz_partial(npz_path, arrays)
+        partials[npz_path] = npz_partial
+        metrics["generation_assets"] = {
+            "png_sha256": _sha256(image_partial),
+            "npz_sha256": _sha256(npz_partial),
+        }
+        json_partial = _write_json_partial(json_path, metrics)
+        partials[json_path] = json_partial
+        _publish_generation(partials)
+    except Exception:
+        for partial in partials.values():
+            _unlink_durable(partial)
+        raise
     return path
 
 
@@ -799,7 +1086,7 @@ def run_figure(
             np.argmin(np.abs(official_energies[official_selected["special"]]))
         ]
         state_indices = (official_selected["sorted_tower"][0], special_index)
-        titles = ("matched tower ground state", "matched special state near E=0")
+        titles = ("matched tower ground state", "matched interior special state")
         for panel, state_index, title in zip(
             (panel_b, panel_c), state_indices, titles
         ):
@@ -887,13 +1174,14 @@ def run_figure(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("--length", type=int, default=14)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument(
+    input_mode = parser.add_mutually_exclusive_group()
+    input_mode.add_argument("--length", type=int, default=14)
+    input_mode.add_argument(
         "--independent-results-root",
         type=Path,
         help="root containing hash-validated Task 6 length directories",
     )
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
         "--official-data-dir",
         type=Path,
