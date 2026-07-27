@@ -1628,6 +1628,22 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
     RUNNER = SCRIPTS / "turner2018_lasg02_run.sh"
     LENGTHS = (22, 24, 26, 28, 30)
 
+    def setUp(self):
+        self.scontrol_directory = tempfile.TemporaryDirectory()
+        self.scontrol_bin = Path(self.scontrol_directory.name)
+        scontrol = self.scontrol_bin / "scontrol"
+        scontrol.write_text(
+            "#!/usr/bin/env bash\n"
+            '[[ "$*" == "show job -o 12345" ]] || exit 97\n'
+            'printf "%s\\n" "${SCONTROL_TEST_OUTPUT:-'
+            "JobId=12345 JobName=turner TimeLimit=1-00:00:00 NumNodes=1}\"\n"
+            'exit "${SCONTROL_TEST_EXIT:-0}"\n'
+        )
+        scontrol.chmod(0o755)
+
+    def tearDown(self):
+        self.scontrol_directory.cleanup()
+
     def _synthetic_root_wrapper(self, root: Path) -> Path:
         spool = root.parent / "slurm-spool-copy"
         spool.write_text(self.WRAPPER.read_text().replace(self.LASG02_ROOT, str(root)))
@@ -1641,12 +1657,13 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
             'printf "%s" "$TURNER_LENGTH" > "$RUNNER_SENTINEL"\n'
         )
 
-    @staticmethod
-    def _valid_runner_environment(memory: str = "80000") -> dict[str, str]:
+    def _valid_runner_environment(self, memory: str = "80000") -> dict[str, str]:
         return {
             **os.environ,
+            "PATH": f"{self.scontrol_bin}:{os.environ['PATH']}",
             "TURNER_ALLOWED_LENGTHS": "22|24|26|28|30",
             "TURNER_LENGTH": "22",
+            "SLURM_JOB_ID": "12345",
             "SLURM_JOB_PARTITION": "ihicnormal",
             "SLURM_JOB_ACCOUNT": "chenkun2025",
             "SLURM_JOB_QOS": "user_student090",
@@ -1654,7 +1671,6 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
             "SLURM_NTASKS": "1",
             "SLURM_CPUS_PER_TASK": "24",
             "SLURM_MEM_PER_NODE": memory,
-            "SLURM_TIMELIMIT": "1440",
         }
 
     def test_wrapper_has_exact_resources_and_canonical_runner_lookup(self):
@@ -1803,7 +1819,17 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
         self.assertIn("turner2018_l32_server.py", text)
         self.assertIn("--stage all", text.replace("\n", " "))
         self.assertNotIn("--declared-memory", text)
+        self.assertNotIn("SLURM_TIMELIMIT", text)
+        self.assertIn('scontrol show job -o "$SLURM_JOB_ID"', text)
         self.assertIn('OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"', text)
+        self.assertLess(
+            text.index('scontrol show job -o "$SLURM_JOB_ID"'),
+            text.index("--check-runtime"),
+        )
+        self.assertLess(
+            text.index('scontrol show job -o "$SLURM_JOB_ID"'),
+            text.index("mkdir -p"),
+        )
         self.assertLess(text.index("--check-runtime"), text.index("mkdir -p"))
         self.assertLess(text.index("--check-runtime"), text.index("exec \"$TURNER_PYTHON\""))
 
@@ -1867,7 +1893,6 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
             ("SLURM_CPUS_PER_TASK", "23"),
             ("SLURM_MEM_PER_NODE", "79999"),
             ("SLURM_MEM_PER_NODE", "80000G"),
-            ("SLURM_TIMELIMIT", "1439"),
         )
         for key, value in mismatches:
             with self.subTest(key=key, value=value):
@@ -1883,6 +1908,7 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
 
     def test_runner_requires_every_scheduler_fact_before_compute(self):
         for key in (
+            "SLURM_JOB_ID",
             "SLURM_JOB_PARTITION",
             "SLURM_JOB_ACCOUNT",
             "SLURM_JOB_QOS",
@@ -1890,7 +1916,6 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
             "SLURM_NTASKS",
             "SLURM_CPUS_PER_TASK",
             "SLURM_MEM_PER_NODE",
-            "SLURM_TIMELIMIT",
         ):
             with self.subTest(key=key):
                 environment = self._valid_runner_environment()
@@ -1904,6 +1929,77 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(key, result.stderr)
                 self.assertNotIn("missing reviewed checkout", result.stderr)
+
+    def test_runner_accepts_standard_scontrol_24_hour_timelimit(self):
+        result = subprocess.run(
+            ["bash", str(self.RUNNER)],
+            env={
+                **self._valid_runner_environment(),
+                "TURNER_REPO": "/tmp/expected-later-path-rejection",
+                "SLURM_TIMELIMIT": "fabricated-value-must-be-ignored",
+            },
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("TURNER_REPO", result.stderr)
+        self.assertNotIn("TimeLimit", result.stderr)
+
+    def test_runner_rejects_malformed_and_mismatched_scontrol_timelimits(self):
+        cases = (
+            ("malformed", "JobId=12345 JobName=turner NumNodes=1"),
+            ("malformed", "JobId=12345 TimeLimit=not-a-duration NumNodes=1"),
+            ("does not match", "JobId=12345 TimeLimit=23:59:59 NumNodes=1"),
+            ("does not match", "JobId=12345 TimeLimit=2-00:00:00 NumNodes=1"),
+        )
+        for expected, output in cases:
+            with self.subTest(output=output):
+                result = subprocess.run(
+                    ["bash", str(self.RUNNER)],
+                    env={
+                        **self._valid_runner_environment(),
+                        "SCONTROL_TEST_OUTPUT": output,
+                    },
+                    text=True,
+                    capture_output=True,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected, result.stderr.lower())
+                self.assertIn("TimeLimit", result.stderr)
+                self.assertNotIn("missing reviewed checkout", result.stderr)
+
+    def test_runner_fails_closed_when_scontrol_query_fails(self):
+        output = Path(self.scontrol_directory.name) / "must-not-exist"
+        result = subprocess.run(
+            ["bash", str(self.RUNNER)],
+            env={
+                **self._valid_runner_environment(),
+                "SCONTROL_TEST_EXIT": "1",
+                "TURNER_OUTPUT_DIR": str(output),
+            },
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("scontrol query failed", result.stderr)
+        self.assertFalse(output.exists())
+
+    def test_runner_fails_closed_when_scontrol_command_is_missing(self):
+        environment = self._valid_runner_environment()
+        environment["PATH"] = str(self.scontrol_bin / "missing")
+        result = subprocess.run(
+            ["/usr/bin/bash", str(self.RUNNER)],
+            env=environment,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("scontrol command is required", result.stderr)
+        self.assertNotIn("missing reviewed checkout", result.stderr)
 
     def test_lasg02_tracked_files_contain_no_private_connection_material(self):
         profile_path = (

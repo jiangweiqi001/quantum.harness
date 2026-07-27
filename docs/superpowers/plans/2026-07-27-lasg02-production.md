@@ -93,4 +93,3 @@
   output files.
 - [ ] Monitor completion, fetch artifacts, validate metrics, and render final
   Fig. 2/3/4 locally.
-

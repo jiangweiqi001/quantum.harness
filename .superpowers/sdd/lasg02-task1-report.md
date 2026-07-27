@@ -77,3 +77,29 @@ canonical tracked profile in a clean checkout. The profile test now asserts the
 symlink target and byte-identical resolution. Tracking another file beneath
 the symlink would be invalid and would replace the repository's established
 single-source architecture.
+
+## Scheduler-query walltime fix
+
+The runner no longer requires or reads the nonstandard `SLURM_TIMELIMIT`
+variable. It now requires the standard `SLURM_JOB_ID`, verifies that `scontrol`
+is available, runs `scontrol show job -o "$SLURM_JOB_ID"`, requires exactly one
+well-formed `TimeLimit` field, and accepts only `TimeLimit=1-00:00:00`. Missing
+commands, failed queries, missing or malformed fields, duplicate fields, and
+non-24-hour values fail before runtime checks, output creation, or computation.
+Local tests provide a realistic executable `scontrol` fixture and never depend
+on an installed Slurm client or controller.
+
+### Scheduler-query TDD and verification evidence
+
+- RED focused: `25 failed, 11 passed, 10 subtests passed`; failures showed the
+  old runner still required `SLURM_TIMELIMIT` and never queried `scontrol`.
+- GREEN LASG02 class: `15 passed, 31 subtests passed`.
+- GREEN focused profile/server files: `98 passed, 97 subtests passed`.
+- GREEN full suite: `710 passed, 97 subtests passed`.
+- `bash -n`, `py_compile`, cumulative/working `git diff --check`, and IDE lint
+  diagnostics passed.
+- Removed the pre-existing extra blank EOF lines from both approved LASG02
+  plan/design documents so the cumulative diff from `4ff307f` is clean.
+- Resume verification repeated the focused files (`98 passed, 97 subtests`) and
+  full suite (`710 passed, 97 subtests`); standard Ruff error rules
+  (`E4,E7,E9,F`) reported `All checks passed`.

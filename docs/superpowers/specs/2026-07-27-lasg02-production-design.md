@@ -47,4 +47,3 @@ resource, state, reason, and output path. A distant scheduler estimate is not
 reported as execution progress; queued jobs remain pending until Slurm
 allocates resources. Failed environment checks must terminate before numerical
 work begins.
-

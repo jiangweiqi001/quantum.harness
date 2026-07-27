@@ -6,9 +6,9 @@ set -euo pipefail
 : "${TURNER_LENGTH:?TURNER_LENGTH is required}"
 
 for variable in \
-  SLURM_JOB_PARTITION SLURM_JOB_ACCOUNT SLURM_JOB_QOS \
+  SLURM_JOB_ID SLURM_JOB_PARTITION SLURM_JOB_ACCOUNT SLURM_JOB_QOS \
   SLURM_JOB_NUM_NODES SLURM_NTASKS SLURM_CPUS_PER_TASK \
-  SLURM_MEM_PER_NODE SLURM_TIMELIMIT
+  SLURM_MEM_PER_NODE
 do
   if [[ -z "${!variable:-}" ]]; then
     echo "$variable is required" >&2
@@ -52,7 +52,35 @@ if [[ "${SLURM_MEM_PER_NODE%M}" != 80000 ]]; then
   echo "SLURM_MEM_PER_NODE=$SLURM_MEM_PER_NODE does not match LASG02 Turner ED (expected 80000 MiB)" >&2
   exit 2
 fi
-require_scheduler_value SLURM_TIMELIMIT 1440
+
+if ! command -v scontrol >/dev/null 2>&1; then
+  echo "scontrol command is required to validate the Slurm walltime" >&2
+  exit 2
+fi
+if ! scheduler_job="$(scontrol show job -o "$SLURM_JOB_ID")"; then
+  echo "scontrol query failed for SLURM_JOB_ID=$SLURM_JOB_ID" >&2
+  exit 2
+fi
+time_limit=""
+time_limit_count=0
+IFS=$' \t\n' read -r -a scheduler_fields <<< "${scheduler_job//$'\n'/ }"
+for scheduler_field in "${scheduler_fields[@]}"; do
+  case "$scheduler_field" in
+    TimeLimit=*)
+      time_limit="${scheduler_field#TimeLimit=}"
+      time_limit_count=$((time_limit_count + 1))
+      ;;
+  esac
+done
+if [[ "$time_limit_count" != 1 ]] || \
+   [[ ! "$time_limit" =~ ^([0-9]+-)?[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+  echo "malformed or missing TimeLimit in scontrol response for SLURM_JOB_ID=$SLURM_JOB_ID" >&2
+  exit 2
+fi
+if [[ "$time_limit" != 1-00:00:00 ]]; then
+  echo "TimeLimit=$time_limit does not match LASG02 Turner ED (expected 1-00:00:00)" >&2
+  exit 2
+fi
 
 readonly TURNER_SHARED_ROOT="/public/home/student090"
 TURNER_REPO="${TURNER_REPO:-$TURNER_SHARED_ROOT/quantum.harness}"
