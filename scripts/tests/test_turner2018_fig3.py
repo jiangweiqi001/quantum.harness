@@ -588,8 +588,9 @@ def test_shared_publication_preserves_backups_when_restore_fsync_fails(
     assert targets[0].with_name("asset-0.backup").read_bytes() == b"old-0"
 
 
-def test_shared_publication_fails_closed_and_preserves_backup_on_cleanup_failure(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("failure_index", [0, 1, 2])
+def test_shared_publication_records_recovery_state_for_each_cleanup_failure(
+    tmp_path, monkeypatch, failure_index
 ):
     targets = tuple(tmp_path / f"asset-{index}" for index in range(3))
     partials = {
@@ -599,10 +600,11 @@ def test_shared_publication_fails_closed_and_preserves_backup_on_cleanup_failure
         target.write_bytes(f"old-{index}".encode())
         partials[target].write_bytes(f"new-{index}".encode())
     original_unlink = fig3._unlink_durable
+    failed_backup = f"asset-{failure_index}.backup"
 
     def fail_existing_backup_cleanup(path):
         path = Path(path)
-        if path.name == "asset-0.backup" and path.is_file():
+        if path.name == failed_backup and path.is_file():
             raise OSError("injected backup cleanup failure")
         return original_unlink(path)
 
@@ -615,7 +617,26 @@ def test_shared_publication_fails_closed_and_preserves_backup_on_cleanup_failure
         target.read_bytes() == f"new-{index}".encode()
         for index, target in enumerate(targets)
     )
-    assert targets[0].with_name("asset-0.backup").read_bytes() == b"old-0"
+    recovery_paths = [
+        path for path in tmp_path.iterdir() if path.name.endswith(".recovery.json")
+    ]
+    assert len(recovery_paths) == 1
+    recovery = json.loads(recovery_paths[0].read_text())
+    assert recovery["state"] == "backup-cleanup-failed"
+    assert all(
+        item["sha256"] == hashlib.sha256(target.read_bytes()).hexdigest()
+        for item, target in zip(recovery["current_generation"], targets)
+    )
+    backup_state = {
+        Path(item["path"]).name: item["present"]
+        for item in recovery["backups"]
+    }
+    assert backup_state == {
+        f"asset-{index}.backup": index >= failure_index for index in range(3)
+    }
+    assert Path(
+        next(item["path"] for item in recovery["backups"] if item["present"])
+    ).is_file()
 
 
 @pytest.mark.parametrize("with_prior_generation", [False, True])

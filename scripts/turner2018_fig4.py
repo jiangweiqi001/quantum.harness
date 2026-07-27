@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -467,31 +468,56 @@ def _load_available_official_histograms(
         return {}
     root = Path(official_data_dir)
     archive = root / "level_statistics.zip"
-    available = [
-        length
-        for length in lengths
-        if length in FIG4_HISTOGRAM_MEMBERS
-        and _zip_has_member(archive, FIG4_HISTOGRAM_MEMBERS[length])
-    ]
-    if not available:
+    if not archive.is_file():
         return {}
-    loaded = load_fig4_histograms(root)
-    archive_sha256 = _sha256(archive)
+    requested = [
+        length for length in lengths if length in FIG4_HISTOGRAM_MEMBERS
+    ]
+    if not requested:
+        return {}
     records: dict[int, dict[str, Any]] = {}
-    with ZipFile(archive) as handle:
-        for length in available:
+    with archive.open("rb") as archive_handle:
+        archive_sha256 = _hash_open_file(archive_handle)
+        archive_byte_size = os.fstat(archive_handle.fileno()).st_size
+        archive_handle.seek(0)
+        try:
+            with ZipFile(archive_handle) as zip_handle:
+                members = set(zip_handle.namelist())
+                member_snapshots = {
+                    length: zip_handle.read(FIG4_HISTOGRAM_MEMBERS[length])
+                    for length in requested
+                    if FIG4_HISTOGRAM_MEMBERS[length] in members
+                }
+        except BadZipFile:
+            return {}
+        if _hash_open_file(archive_handle) != archive_sha256:
+            raise RuntimeError(
+                "official Fig. 4 archive changed while its open snapshot was consumed"
+            )
+        for length, member_bytes in member_snapshots.items():
             member = FIG4_HISTOGRAM_MEMBERS[length]
-            member_bytes = handle.read(member)
+            xy = np.loadtxt(BytesIO(member_bytes))
+            if (
+                xy.shape != (25, 2)
+                or not np.all(np.isfinite(xy))
+                or np.any(xy[:, 1] < 0)
+            ):
+                raise RuntimeError(
+                    f"official Fig. 4 member is invalid for L={length}"
+                )
             records[length] = {
-                "xy": np.column_stack(loaded[length]),
+                "xy": xy,
                 "provenance": {
                     "source": OFFICIAL_SOURCE,
                     "archive_path": str(archive.resolve()),
                     "archive_sha256": archive_sha256,
-                    "archive_byte_size": archive.stat().st_size,
+                    "archive_byte_size": archive_byte_size,
                     "member": member,
                     "member_sha256": hashlib.sha256(member_bytes).hexdigest(),
                     "member_byte_size": len(member_bytes),
+                    "snapshot_semantics": (
+                        "array and hashes consumed from one stable open archive handle"
+                    ),
                 },
             }
     return records

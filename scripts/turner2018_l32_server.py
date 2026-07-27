@@ -881,7 +881,13 @@ def run_validate(
     )
 
 
-def _accepted_figure(path: Path, label: str, *, length: int) -> dict[str, Any]:
+def _accepted_figure(
+    path: Path,
+    label: str,
+    *,
+    length: int,
+    expected_lengths: list[int] | None = None,
+) -> dict[str, Any]:
     import numpy as np
 
     if not path.is_file():
@@ -906,6 +912,7 @@ def _accepted_figure(path: Path, label: str, *, length: int) -> dict[str, Any]:
     try:
         with np.load(npz_path, allow_pickle=False) as arrays:
             npz_generation_id = arrays["generation_id"].item()
+            array_names = tuple(arrays.files)
     except (OSError, ValueError, KeyError) as error:
         raise RuntimeError(f"{label} NPZ generation identity is invalid") from error
     if npz_generation_id != generation_id:
@@ -918,24 +925,58 @@ def _accepted_figure(path: Path, label: str, *, length: int) -> dict[str, Any]:
         raise RuntimeError(f"{label} generation asset hash check failed")
     if label == "Fig. 4":
         acceptance = metrics["acceptance"]
-        production_statistics_required = length in {28, 30, 32}
-        if production_statistics_required and (
-            acceptance.get("statistics_required") is not True
-            or acceptance.get("statistics_passed") is not True
-            or metrics.get("lengths", {})
-            .get(str(length), {})
-            .get("histogram_acceptance", {})
-            .get("passed")
-            is not True
-        ):
-            raise RuntimeError(
-                f"{label} statistics acceptance is required for production L={length}"
-            )
-        if not production_statistics_required and (
+        if (
             acceptance.get("provenance_passed") is not True
             or acceptance.get("render_passed") is not True
         ):
             raise RuntimeError(f"{label} provenance/render acceptance is invalid")
+        scope = metrics.get("available_independent_lengths")
+        expected_scope = expected_lengths or [length]
+        if (
+            scope != expected_scope
+            or metrics.get("layout", {}).get("lengths") != expected_scope
+            or set(metrics.get("lengths", {}))
+            != {str(item) for item in expected_scope}
+            or any(
+                entry.get("length") not in set(expected_scope)
+                for entry in metrics.get("series", {}).values()
+            )
+        ):
+            raise RuntimeError(f"{label} scoped lengths/series are invalid")
+        if len(expected_scope) == 1:
+            prefix = f"L{expected_scope[0]}_"
+            official_prefix = f"official_L{expected_scope[0]}_"
+            if any(
+                name != "generation_id"
+                and not name.startswith(prefix)
+                and not name.startswith(official_prefix)
+                for name in array_names
+            ):
+                raise RuntimeError(f"{label} NPZ scoped lengths are invalid")
+        production_lengths = [
+            item for item in expected_scope if item in {28, 30, 32}
+        ]
+        if production_lengths and (
+            acceptance.get("statistics_required") is not True
+            or acceptance.get("statistics_passed") is not True
+            or any(
+                metrics.get("lengths", {})
+                .get(str(item), {})
+                .get("provenance_acceptance", {})
+                .get("passed")
+                is not True
+                or metrics.get("lengths", {})
+                .get(str(item), {})
+                .get("histogram_acceptance", {})
+                .get("passed")
+                is not True
+                for item in production_lengths
+            )
+        ):
+            raise RuntimeError(
+                f"{label} statistics acceptance is required for production "
+                f"lengths={production_lengths}"
+            )
     return {
         "path": str(path.relative_to(path.parents[1])),
         "sha256": _sha256(path),
@@ -944,6 +985,47 @@ def _accepted_figure(path: Path, label: str, *, length: int) -> dict[str, Any]:
         "arrays_path": str(npz_path.relative_to(npz_path.parents[1])),
         "arrays_sha256": _sha256(npz_path),
         "generation_id": generation_id,
+    }
+
+
+def _accepted_fig4_set(path: Path, *, length: int) -> dict[str, Any]:
+    try:
+        overview_metrics = json.loads(path.with_suffix(".json").read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("Fig. 4 overview JSON sidecar is invalid") from error
+    available = overview_metrics.get("available_independent_lengths")
+    if (
+        not isinstance(available, list)
+        or not available
+        or any(not isinstance(item, int) for item in available)
+        or length not in available
+    ):
+        raise RuntimeError("Fig. 4 overview has invalid available lengths")
+    overview = _accepted_figure(
+        path,
+        "Fig. 4",
+        length=length,
+        expected_lengths=available,
+    )
+    sizes: dict[str, dict[str, Any]] = {}
+    for size in available:
+        size_path = path.parent / f"fig4_independent_L{size}.png"
+        sizes[str(size)] = _accepted_figure(
+            size_path,
+            "Fig. 4",
+            length=length,
+            expected_lengths=[size],
+        )
+    generation_ids = {
+        overview["generation_id"],
+        *(record["generation_id"] for record in sizes.values()),
+    }
+    if len(generation_ids) != 1:
+        raise RuntimeError("Fig. 4 output set has mixed generation identities")
+    return {
+        "generation_id": overview["generation_id"],
+        "overview": overview,
+        "sizes": sizes,
     }
 
 
@@ -981,8 +1063,15 @@ def _validate_figures_stage_references(
         recorded = summary.get(key)
         if not isinstance(recorded, dict):
             raise RuntimeError(f"combined figures manifest is missing {key}")
-        path = _resolve_figure_reference(output_dir, recorded.get("path"))
-        actual = _accepted_figure(path, label, length=length)
+        if key == "fig3":
+            path = _resolve_figure_reference(output_dir, recorded.get("path"))
+            actual = _accepted_figure(path, label, length=length)
+        else:
+            overview = recorded.get("overview")
+            if not isinstance(overview, dict):
+                raise RuntimeError("combined figures manifest is missing Fig. 4 overview")
+            path = _resolve_figure_reference(output_dir, overview.get("path"))
+            actual = _accepted_fig4_set(path, length=length)
         if actual != recorded:
             raise RuntimeError(f"{label} figure reference hash/provenance mismatch")
 
@@ -992,7 +1081,7 @@ def run_figures(length: int, output_dir: Path) -> None:
     fig3_artifact = Path(FIG3_RENDERER_ADAPTER(output_dir, length))
     fig3 = _accepted_figure(fig3_artifact, "Fig. 3", length=length)
     fig4_artifact = Path(FIG4_RENDERER_ADAPTER(output_dir, length))
-    fig4 = _accepted_figure(fig4_artifact, "Fig. 4", length=length)
+    fig4 = _accepted_fig4_set(fig4_artifact, length=length)
     summary = {
         "schema_version": SCHEMA_VERSION,
         "status": "passed",

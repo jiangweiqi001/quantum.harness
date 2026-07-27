@@ -349,46 +349,88 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             output = Path(directory)
             self.run_stage(output, "all")
             fig3_artifact = output / "figures" / "fig3.png"
-            fig4_artifact = output / "figures" / "fig4.png"
+            fig4_overview = output / "figures" / "fig4_independent_all.png"
+            fig4_size = output / "figures" / "fig4_independent_L10.png"
 
-            def render(path, payload, passed=True):
+            def render(path, payload, passed=True, *, lengths=None, generation_id=None):
                 path.parent.mkdir(exist_ok=True)
                 path.write_bytes(payload)
-                generation_id = path.stem
+                generation_id = generation_id or path.stem
                 np.savez(
                     path.with_suffix(".npz"),
                     generation_id=np.asarray(generation_id),
+                    **(
+                        {f"L{lengths[0]}_source": np.asarray("independent-ed")}
+                        if lengths and len(lengths) == 1
+                        else {}
+                    ),
                 )
-                path.with_suffix(".json").write_text(
-                    json.dumps(
+                metrics = {
+                    "source": "independent-ed",
+                    "acceptance": {
+                        "passed": passed,
+                        "generated_source": "independent-ed",
+                        "provenance_passed": True,
+                        "render_passed": True,
+                        "statistics_passed": True,
+                        "statistics_required": False,
+                    },
+                    "generation_id": generation_id,
+                    "generation_assets": {
+                        "png_sha256": hashlib.sha256(payload).hexdigest(),
+                        "npz_sha256": hashlib.sha256(
+                            path.with_suffix(".npz").read_bytes()
+                        ).hexdigest(),
+                    },
+                }
+                if lengths is not None:
+                    metrics.update(
                         {
-                            "source": "independent-ed",
-                            "acceptance": {
-                                "passed": passed,
-                                "generated_source": "independent-ed",
-                                "provenance_passed": True,
-                                "render_passed": True,
-                                "statistics_passed": True,
-                                "statistics_required": False,
+                            "available_independent_lengths": lengths,
+                            "layout": {"lengths": lengths},
+                            "lengths": {
+                                str(item): {
+                                    "provenance_acceptance": {"passed": True},
+                                    "histogram_acceptance": {"passed": True},
+                                }
+                                for item in lengths
                             },
-                            "generation_id": generation_id,
-                            "generation_assets": {
-                                "png_sha256": hashlib.sha256(payload).hexdigest(),
-                                "npz_sha256": hashlib.sha256(
-                                    path.with_suffix(".npz").read_bytes()
-                                ).hexdigest(),
+                            "series": {
+                                f"L{item}_source": {
+                                    "source": "independent-ed",
+                                    "length": item,
+                                }
+                                for item in lengths
                             },
                         }
                     )
+                path.with_suffix(".json").write_text(
+                    json.dumps(metrics)
                 )
                 return path
+
+            def render_fig4(*_args):
+                generation_id = "fig4-set-generation"
+                render(
+                    fig4_overview,
+                    b"fig4-overview",
+                    lengths=[10],
+                    generation_id=generation_id,
+                )
+                render(
+                    fig4_size,
+                    b"fig4-size",
+                    lengths=[10],
+                    generation_id=generation_id,
+                )
+                return fig4_overview
 
             with mock.patch(
                 "turner2018_l32_server.FIG3_RENDERER_ADAPTER",
                 side_effect=lambda *_: render(fig3_artifact, b"fig3"),
             ) as fig3_renderer, mock.patch(
                 "turner2018_l32_server.FIG4_RENDERER_ADAPTER",
-                side_effect=lambda *_: render(fig4_artifact, b"fig4"),
+                side_effect=render_fig4,
             ) as fig4_renderer:
                 self.run_stage(output, "figures")
 
@@ -397,16 +439,27 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             manifest = require_stage(output, "figures")
             summary = json.loads((output / manifest["artifact"]["path"]).read_text())
             self.assertEqual(summary["fig3"]["sha256"], hashlib.sha256(b"fig3").hexdigest())
-            self.assertEqual(summary["fig4"]["sha256"], hashlib.sha256(b"fig4").hexdigest())
+            self.assertEqual(
+                summary["fig4"]["overview"]["sha256"],
+                hashlib.sha256(b"fig4-overview").hexdigest(),
+            )
+            self.assertEqual(set(summary["fig4"]["sizes"]), {"10"})
+            self.assertEqual(
+                summary["fig4"]["sizes"]["10"]["sha256"],
+                hashlib.sha256(b"fig4-size").hexdigest(),
+            )
             self.assertTrue(summary["acceptance"]["passed"])
 
             referenced = (
                 fig3_artifact,
                 fig3_artifact.with_suffix(".npz"),
                 fig3_artifact.with_suffix(".json"),
-                fig4_artifact,
-                fig4_artifact.with_suffix(".npz"),
-                fig4_artifact.with_suffix(".json"),
+                fig4_overview,
+                fig4_overview.with_suffix(".npz"),
+                fig4_overview.with_suffix(".json"),
+                fig4_size,
+                fig4_size.with_suffix(".npz"),
+                fig4_size.with_suffix(".json"),
             )
             for target in referenced:
                 with self.subTest(target=target.name):
@@ -438,24 +491,30 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                     path.with_suffix(".npz"),
                     generation_id=np.asarray(generation_id),
                 )
-                path.with_suffix(".json").write_text(
-                    json.dumps(
+                metrics = {
+                    "source": "independent-ed",
+                    "acceptance": {
+                        "passed": passed,
+                        "generated_source": "independent-ed",
+                    },
+                    "generation_id": generation_id,
+                    "generation_assets": {
+                        "png_sha256": hashlib.sha256(payload).hexdigest(),
+                        "npz_sha256": hashlib.sha256(
+                            path.with_suffix(".npz").read_bytes()
+                        ).hexdigest(),
+                    },
+                }
+                if path == fig4:
+                    metrics.update(
                         {
-                            "source": "independent-ed",
-                            "acceptance": {
-                                "passed": passed,
-                                "generated_source": "independent-ed",
-                            },
-                            "generation_id": generation_id,
-                            "generation_assets": {
-                                "png_sha256": hashlib.sha256(payload).hexdigest(),
-                                "npz_sha256": hashlib.sha256(
-                                    path.with_suffix(".npz").read_bytes()
-                                ).hexdigest(),
-                            },
+                            "available_independent_lengths": [10],
+                            "layout": {"lengths": [10]},
+                            "lengths": {"10": {}},
+                            "series": {},
                         }
                     )
-                )
+                path.with_suffix(".json").write_text(json.dumps(metrics))
                 return path
 
             with mock.patch(
@@ -525,6 +584,20 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                             "statistics_passed": False,
                             "statistics_required": False,
                         },
+                        "available_independent_lengths": [28],
+                        "layout": {"lengths": [28]},
+                        "lengths": {
+                            "28": {
+                                "provenance_acceptance": {"passed": True},
+                                "histogram_acceptance": {"passed": False},
+                            }
+                        },
+                        "series": {
+                            "L28_source": {
+                                "source": "independent-ed",
+                                "length": 28,
+                            }
+                        },
                         "generation_assets": {
                             "png_sha256": hashlib.sha256(b"png").hexdigest(),
                             "npz_sha256": hashlib.sha256(npz.read_bytes()).hexdigest(),
@@ -535,6 +608,21 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "statistics acceptance"):
                 server._accepted_figure(path, "Fig. 4", length=28)
+
+            metrics_path = path.with_suffix(".json")
+            metrics = json.loads(metrics_path.read_text())
+            metrics["acceptance"]["statistics_required"] = True
+            metrics["acceptance"]["statistics_passed"] = True
+            metrics["lengths"]["28"]["histogram_acceptance"]["passed"] = True
+            for field in ("provenance_passed", "render_passed"):
+                with self.subTest(field=field):
+                    candidate = json.loads(json.dumps(metrics))
+                    candidate["acceptance"][field] = False
+                    metrics_path.write_text(json.dumps(candidate))
+                    with self.assertRaisesRegex(
+                        RuntimeError, "provenance/render acceptance"
+                    ):
+                        server._accepted_figure(path, "Fig. 4", length=28)
 
     def test_observables_and_validate_never_full_slice_eigenvectors(self):
         import h5py

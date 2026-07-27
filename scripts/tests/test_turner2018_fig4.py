@@ -842,20 +842,18 @@ def test_size_specific_sidecars_have_exactly_one_length_and_series(
 def test_official_overlay_records_archive_and_member_hashes(tmp_path, monkeypatch):
     archive = tmp_path / "level_statistics.zip"
     member = FIG4_HISTOGRAM_MEMBERS[28]
-    member_bytes = b"synthetic official histogram member"
-    with ZipFile(archive, "w") as handle:
-        handle.writestr(member, member_bytes)
     xy = np.column_stack(
         (
             np.r_[0.0, PAPER_HISTOGRAM_CENTERS],
             np.r_[0.0, np.ones(24) / 4.8],
         )
     )
-    monkeypatch.setattr(
-        fig4,
-        "load_fig4_histograms",
-        lambda _root: {28: (xy[:, 0], xy[:, 1])},
-    )
+    member_bytes = "\n".join(
+        f"{x:.17g} {y:.17g}" for x, y in xy
+    ).encode()
+    with ZipFile(archive, "w") as handle:
+        for official_member in FIG4_HISTOGRAM_MEMBERS.values():
+            handle.writestr(official_member, member_bytes)
 
     loaded = fig4._load_available_official_histograms(tmp_path, [28])
 
@@ -881,6 +879,53 @@ def test_official_overlay_records_archive_and_member_hashes(tmp_path, monkeypatc
     metrics = json.loads(paths["figure_L28"].with_suffix(".json").read_text())
     assert metrics["lengths"]["28"]["official_source_provenance"] == provenance
     assert metrics["official_data"]["overlays"]["28"] == provenance
+
+
+def test_official_overlay_consumes_and_hashes_same_open_archive_snapshot(
+    tmp_path, monkeypatch
+):
+    archive = tmp_path / "level_statistics.zip"
+    replacement = tmp_path / "replacement.zip"
+    xy_a = np.column_stack(
+        (
+            np.r_[0.0, PAPER_HISTOGRAM_CENTERS],
+            np.r_[0.0, np.linspace(0.1, 0.4, 24)],
+        )
+    )
+    xy_b = xy_a.copy()
+    xy_b[:, 1] += 7.0
+
+    def write_archive(path, values):
+        payload = "\n".join(
+            f"{x:.17g} {y:.17g}" for x, y in values
+        ).encode()
+        with ZipFile(path, "w") as handle:
+            for member in FIG4_HISTOGRAM_MEMBERS.values():
+                handle.writestr(member, payload)
+
+    write_archive(archive, xy_a)
+    write_archive(replacement, xy_b)
+    original_bytes = archive.read_bytes()
+    original_hash_open_file = fig4._hash_open_file
+    hash_calls = 0
+
+    def replace_path_after_initial_hash(handle):
+        nonlocal hash_calls
+        digest = original_hash_open_file(handle)
+        hash_calls += 1
+        if hash_calls == 1:
+            os.replace(replacement, archive)
+        return digest
+
+    monkeypatch.setattr(fig4, "_hash_open_file", replace_path_after_initial_hash)
+
+    loaded = fig4._load_available_official_histograms(tmp_path, [28])
+
+    np.testing.assert_allclose(loaded[28]["xy"], xy_a)
+    assert archive.read_bytes() != original_bytes
+    assert loaded[28]["provenance"]["archive_sha256"] == hashlib.sha256(
+        original_bytes
+    ).hexdigest()
 
 
 @pytest.mark.parametrize("with_prior_generation", [False, True])

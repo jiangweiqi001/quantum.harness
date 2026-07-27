@@ -116,6 +116,114 @@ def _write_npz_partial(partial: Path, arrays: dict[str, np.ndarray]) -> None:
         os.fsync(handle.fileno())
 
 
+def _recovery_manifest_path(targets: tuple[Path, ...]) -> Path:
+    parents = {target.parent.resolve() for target in targets}
+    if len(parents) != 1:
+        raise RuntimeError("transactional generation targets must share one directory")
+    identity = hashlib.sha256(
+        "\0".join(str(target.resolve()) for target in targets).encode("utf-8")
+    ).hexdigest()[:16]
+    return targets[0].parent / f".generation-{identity}.recovery.json"
+
+
+def _write_recovery_manifest(path: Path, payload: dict[str, Any]) -> None:
+    partial = path.with_name(path.name + ".partial")
+    try:
+        _write_json_partial(partial, payload)
+        os.replace(partial, path)
+        _fsync_parent(path)
+    except Exception:
+        try:
+            _unlink_durable(partial)
+        except Exception:
+            pass
+        raise
+
+
+def _generation_recovery_payload(
+    *,
+    state: str,
+    targets: tuple[Path, ...],
+    backups: dict[Path, Path],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "figure-generation-recovery-v1",
+        "state": state,
+        "current_generation": [
+            {
+                "path": str(target),
+                "sha256": _sha256(target),
+                "present": target.is_file(),
+            }
+            for target in targets
+        ],
+        "backups": [
+            {
+                "target": str(target),
+                "path": str(backup),
+                "present": backup.is_file(),
+                "sha256": _sha256(backup) if backup.is_file() else None,
+            }
+            for target, backup in backups.items()
+        ],
+    }
+
+
+def _cleanup_published_backups(
+    targets: tuple[Path, ...],
+    backups: dict[Path, Path],
+) -> None:
+    recovery_path = _recovery_manifest_path(targets)
+    _write_recovery_manifest(
+        recovery_path,
+        _generation_recovery_payload(
+            state="backup-cleanup-pending",
+            targets=targets,
+            backups=backups,
+        ),
+    )
+    for backup in backups.values():
+        try:
+            _unlink_durable(backup)
+        except Exception as cleanup_error:
+            try:
+                _write_recovery_manifest(
+                    recovery_path,
+                    _generation_recovery_payload(
+                        state="backup-cleanup-failed",
+                        targets=targets,
+                        backups=backups,
+                    ),
+                )
+            except Exception as recovery_error:
+                raise RuntimeError(
+                    "published backup cleanup failed; prior recovery state preserved"
+                ) from ExceptionGroup(
+                    "backup cleanup and recovery bookkeeping errors",
+                    [cleanup_error, recovery_error],
+                )
+            raise RuntimeError(
+                "published backup cleanup incomplete; recovery state preserved"
+            ) from cleanup_error
+        _write_recovery_manifest(
+            recovery_path,
+            _generation_recovery_payload(
+                state="backup-cleanup-pending",
+                targets=targets,
+                backups=backups,
+            ),
+        )
+    _write_recovery_manifest(
+        recovery_path,
+        _generation_recovery_payload(
+            state="backup-cleanup-complete",
+            targets=targets,
+            backups=backups,
+        ),
+    )
+    _unlink_durable(recovery_path)
+
+
 def _publish_generation(partials: dict[Path, Path]) -> None:
     """Publish one file set or durably restore/preserve its predecessor."""
     targets = tuple(partials)
@@ -123,6 +231,11 @@ def _publish_generation(partials: dict[Path, Path]) -> None:
     if any(existing) and not all(existing):
         raise RuntimeError("refusing to replace an incomplete prior Fig. 3 generation")
     backups = {target: target.with_name(target.name + ".backup") for target in targets}
+    recovery_path = _recovery_manifest_path(targets)
+    if recovery_path.is_file():
+        raise RuntimeError(
+            f"unresolved generation recovery state requires inspection: {recovery_path}"
+        )
 
     def cleanup_until_failure(paths: Any, operation: str) -> None:
         for path in paths:
@@ -188,7 +301,8 @@ def _publish_generation(partials: dict[Path, Path]) -> None:
         raise publish_error
 
     cleanup_until_failure(partials.values(), "published partial cleanup")
-    cleanup_until_failure(backups.values(), "published backup cleanup")
+    if all(existing):
+        _cleanup_published_backups(targets, backups)
 
 
 def _discover_task6_directories(root: Path) -> list[Path]:
