@@ -121,8 +121,16 @@ def test_shell_panel_selector_result_is_structurally_immutable():
     assert is_dataclass(panel_b)
     with pytest.raises(FrozenInstanceError):
         panel_b.role = "changed"
-    with pytest.raises(ValueError, match="read-only"):
-        panel_b.shell[0] = 99
+    for field in ("shell", "exact_weights", "fsa_weights"):
+        stored = getattr(panel_b, field)
+        assert isinstance(stored, tuple)
+        assert not hasattr(stored, "setflags")
+        with pytest.raises(TypeError):
+            stored[0] = 99
+        local = np.asarray(stored)
+        local.setflags(write=True)
+        local[0] = 99
+        assert getattr(panel_b, field) == stored
     metadata = panel_b.to_metadata_dict()
     metadata["role"] = "changed-at-serialization-boundary"
     assert panel_b.role == "lowest-matched-scar"

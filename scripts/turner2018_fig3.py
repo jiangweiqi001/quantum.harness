@@ -647,7 +647,7 @@ def _configure_overlap_axis(panel: Any) -> None:
 
 @dataclass(frozen=True, slots=True)
 class Fig3ShellPanelState(Mapping[str, Any]):
-    """Immutable selected-state metadata plus read-only plot arrays."""
+    """Immutable selected-state metadata plus immutable plot tuples."""
 
     panel: str
     role: str
@@ -664,15 +664,18 @@ class Fig3ShellPanelState(Mapping[str, Any]):
     folding: str
     exact_weight_sum: float
     fsa_weight_sum: float
-    shell: np.ndarray
-    exact_weights: np.ndarray
-    fsa_weights: np.ndarray
+    shell: tuple[int, ...]
+    exact_weights: tuple[float, ...]
+    fsa_weights: tuple[float, ...]
 
     def __post_init__(self) -> None:
-        for name in ("shell", "exact_weights", "fsa_weights"):
-            values = np.array(getattr(self, name), copy=True)
-            values.flags.writeable = False
-            object.__setattr__(self, name, values)
+        object.__setattr__(self, "shell", tuple(int(value) for value in self.shell))
+        for name in ("exact_weights", "fsa_weights"):
+            object.__setattr__(
+                self,
+                name,
+                tuple(float(value) for value in getattr(self, name)),
+            )
 
     def __getitem__(self, key: str) -> Any:
         if key not in {field.name for field in fields(self)}:
@@ -846,9 +849,9 @@ def select_fig3_shell_panel_states(
             folding=folding,
             exact_weight_sum=float(np.sum(exact_weights)),
             fsa_weight_sum=float(np.sum(fsa_weights)),
-            shell=shell,
-            exact_weights=exact_weights,
-            fsa_weights=fsa_weights,
+            shell=tuple(shell),
+            exact_weights=tuple(exact_weights),
+            fsa_weights=tuple(fsa_weights),
         )
 
     return (
@@ -945,17 +948,20 @@ def render_independent_fig3(
         panel_titles,
     ):
         label = selection["panel"]
+        shell = np.asarray(selection["shell"], dtype=np.int64)
+        exact_weights = np.asarray(selection["exact_weights"], dtype=np.float64)
+        fsa_weights = np.asarray(selection["fsa_weights"], dtype=np.float64)
         panel.plot(
-            selection["shell"],
-            selection["exact_weights"],
+            shell,
+            exact_weights,
             "o-",
             color="black",
             markersize=3,
             label="exact",
         )
         panel.plot(
-            selection["shell"],
-            selection["fsa_weights"],
+            shell,
+            fsa_weights,
             "x--",
             color="red",
             label="FSA",
@@ -967,9 +973,9 @@ def render_independent_fig3(
         panel.set_ylabel("squared shell weight")
         panel.legend(fontsize=8)
         for name, values in (
-            ("shell", selection["shell"]),
-            ("exact_weights", selection["exact_weights"]),
-            ("fsa_weights", selection["fsa_weights"]),
+            ("shell", shell),
+            ("exact_weights", exact_weights),
+            ("fsa_weights", fsa_weights),
         ):
             key = f"panel_{label}_L{primary_length}_{name}"
             arrays[key] = np.asarray(values)
@@ -1503,17 +1509,22 @@ def run_figure(
         for panel, selection, title in zip(
             (panel_b, panel_c), official_panels, titles
         ):
+            shell = np.asarray(selection["shell"], dtype=np.int64)
+            exact_weights = np.asarray(
+                selection["exact_weights"], dtype=np.float64
+            )
+            fsa_weights = np.asarray(selection["fsa_weights"], dtype=np.float64)
             panel.plot(
-                selection["shell"],
-                selection["exact_weights"],
+                shell,
+                exact_weights,
                 "o-",
                 color="black",
                 markersize=3,
                 label="exact",
             )
             panel.plot(
-                selection["shell"],
-                selection["fsa_weights"],
+                shell,
+                fsa_weights,
                 "x--",
                 color="red",
                 label="FSA",

@@ -886,6 +886,7 @@ def _validate_fig3_shell_selection(
     arrays: dict[str, Any],
     *,
     length: int,
+    upstream: dict[str, Any],
 ) -> None:
     import numpy as np
 
@@ -1013,16 +1014,32 @@ def _validate_fig3_shell_selection(
 
     source_prefix = f"selection_L{length}_"
     try:
-        energies = np.asarray(arrays[f"panel_a_L{length}_energies"])
-        amplitudes = np.asarray(
+        sidecar_energies = np.asarray(arrays[f"panel_a_L{length}_energies"])
+        sidecar_amplitudes = np.asarray(
             arrays[source_prefix + "exact_shell_amplitudes"]
         )
-        hamiltonian = np.asarray(
+        sidecar_hamiltonian = np.asarray(
             arrays[source_prefix + "fsa_hamiltonian_sector"]
         )
-        tower = np.asarray(arrays[source_prefix + "match_exact_indices"])
+        sidecar_tower = np.asarray(arrays[source_prefix + "match_exact_indices"])
     except KeyError as error:
         raise RuntimeError(f"{failure}: missing NPZ source evidence") from error
+    if (
+        upstream.get("length") != length
+        or per_length.get("source_hashes") != upstream.get("source_hashes")
+    ):
+        raise RuntimeError(f"{failure}: current upstream source hashes mismatch")
+    energies = np.asarray(upstream["energies"])
+    amplitudes = np.asarray(upstream["exact_shell_amplitudes"])
+    hamiltonian = np.asarray(upstream["fsa_hamiltonian_sector"])
+    tower = np.asarray(upstream["selector"]["tower"], dtype=np.int64)
+    if (
+        not np.array_equal(sidecar_energies, energies)
+        or not np.array_equal(sidecar_amplitudes, amplitudes)
+        or not np.array_equal(sidecar_hamiltonian, hamiltonian)
+        or not np.array_equal(sidecar_tower, tower)
+    ):
+        raise RuntimeError(f"{failure}: NPZ evidence differs from current upstream")
     if (
         hashlib.sha256(amplitudes.tobytes()).hexdigest()
         != fsa.get("shell_amplitudes_sha256")
@@ -1147,7 +1164,20 @@ def _accepted_figure(
     ):
         raise RuntimeError(f"{label} generation asset hash check failed")
     if label == "Fig. 3":
-        _validate_fig3_shell_selection(metrics, fig3_arrays, length=length)
+        from turner2018_fig3 import _load_independent_length
+
+        try:
+            upstream = _load_independent_length(path.parents[1])
+        except (OSError, ValueError, RuntimeError) as error:
+            raise RuntimeError(
+                "Fig. 3 current upstream validated snapshot is invalid"
+            ) from error
+        _validate_fig3_shell_selection(
+            metrics,
+            fig3_arrays,
+            length=length,
+            upstream=upstream,
+        )
     if label == "Fig. 4":
         acceptance = metrics["acceptance"]
         if (

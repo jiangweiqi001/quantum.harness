@@ -833,6 +833,100 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                     ):
                         self.run_stage(output, "figures")
 
+    def test_figures_stage_rejects_coordinated_fig3_rewrite_against_upstream(self):
+        import h5py
+        import numpy as np
+        import turner2018_fig3 as fig3
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            build_execution_fingerprint()
+            self.run_stage(output, "all")
+            self.run_stage(output, "figures")
+            figure = output / "figures" / "fig3_independent_L10.png"
+            metrics_path = figure.with_suffix(".json")
+            arrays_path = figure.with_suffix(".npz")
+            summary_path = output / "figures" / "manifest.json"
+            stage_path = output / "stages" / "figures.json"
+
+            metrics = json.loads(metrics_path.read_text())
+            with np.load(arrays_path, allow_pickle=False) as archive:
+                arrays = {name: archive[name].copy() for name in archive.files}
+            energies = arrays["panel_a_L10_energies"] + 0.125
+            amplitudes = arrays["selection_L10_exact_shell_amplitudes"] * 0.99
+            hamiltonian = arrays["selection_L10_fsa_hamiltonian_sector"] + (
+                np.eye(6) * 0.125
+            )
+            tower = arrays["selection_L10_match_exact_indices"]
+            states = fig3.select_fig3_shell_panel_states(
+                length=10,
+                energies=energies,
+                exact_shell_amplitudes=amplitudes,
+                fsa_hamiltonian_sector=hamiltonian,
+                matched_tower={"tower": tower},
+            )
+            fsa_energies, fsa_vectors = np.linalg.eigh(hamiltonian)
+            projection = np.abs(amplitudes.T @ fsa_vectors) ** 2
+
+            arrays["panel_a_L10_energies"] = energies
+            arrays["panel_a_L10_fsa_energies"] = fsa_energies
+            arrays["selection_L10_exact_shell_amplitudes"] = amplitudes
+            arrays["selection_L10_fsa_hamiltonian_sector"] = hamiltonian
+            for state in states:
+                prefix = f"panel_{state.panel}_L10_"
+                arrays[prefix + "shell"] = np.asarray(state.shell)
+                arrays[prefix + "exact_weights"] = np.asarray(state.exact_weights)
+                arrays[prefix + "fsa_weights"] = np.asarray(state.fsa_weights)
+            with arrays_path.open("wb") as handle:
+                np.savez(handle, **arrays)
+
+            selected = [state.to_metadata_dict() for state in states]
+            fsa = metrics["lengths"]["10"]["fsa"]
+            metrics["selected_panel_states"] = selected
+            fsa["selected_states"] = selected
+            fsa["match_exact_energies"] = energies[tower].tolist()
+            fsa["fsa_energies"] = fsa_energies.tolist()
+            fsa["match_strengths"] = projection[
+                tower, np.arange(len(tower))
+            ].tolist()
+            fsa["shell_amplitudes_sha256"] = hashlib.sha256(
+                amplitudes.tobytes()
+            ).hexdigest()
+            fsa["fsa_hamiltonian_sha256"] = hashlib.sha256(
+                hamiltonian.tobytes()
+            ).hexdigest()
+            metrics["generation_assets"]["npz_sha256"] = hashlib.sha256(
+                arrays_path.read_bytes()
+            ).hexdigest()
+            metrics_path.write_text(json.dumps(metrics))
+
+            summary = json.loads(summary_path.read_text())
+            summary["fig3"]["metrics_sha256"] = hashlib.sha256(
+                metrics_path.read_bytes()
+            ).hexdigest()
+            summary["fig3"]["arrays_sha256"] = hashlib.sha256(
+                arrays_path.read_bytes()
+            ).hexdigest()
+            summary_path.write_text(json.dumps(summary))
+            stage = json.loads(stage_path.read_text())
+            stage["artifact"]["sha256"] = hashlib.sha256(
+                summary_path.read_bytes()
+            ).hexdigest()
+            stage_path.write_text(json.dumps(stage))
+
+            original_getitem = h5py.Dataset.__getitem__
+
+            def reject_eigenvectors(dataset, key):
+                if dataset.name.endswith("/vectors"):
+                    raise AssertionError("semantic restart must not load eigenvectors")
+                return original_getitem(dataset, key)
+
+            with mock.patch.object(h5py.Dataset, "__getitem__", reject_eigenvectors):
+                with self.assertRaisesRegex(
+                    RuntimeError, "Fig. 3.*upstream|source evidence"
+                ):
+                    self.run_stage(output, "figures")
+
     def test_production_fig4_gate_requires_accepted_statistics(self):
         import numpy as np
         import turner2018_l32_server as server
