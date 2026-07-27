@@ -19,6 +19,12 @@ import scipy.sparse as sp
 
 
 SCHEMA_VERSION = "turner2018-independent-ed-v1"
+STAGE_ARTIFACT_NAMES = {
+    "basis": "basis.npz",
+    "hamiltonian": "hamiltonian.csr.npz",
+    "eigensystem": "eigensystem.h5",
+    "observables": "observables.h5",
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,21 @@ def _cleanup_partial(path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         return
+
+
+def _cleanup_temp(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _git_revision() -> str | None:
@@ -109,6 +130,7 @@ def _write_stage_manifest(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(partial, target)
+        _fsync_parent_directory(target)
     except Exception:
         _cleanup_partial(partial)
         raise
@@ -124,55 +146,160 @@ def _atomic_write_h5(path: Path, writer: Any) -> None:
             handle.flush()
         _fsync_file(partial)
         os.replace(partial, path)
+        _fsync_parent_directory(path)
     except Exception:
         _cleanup_partial(partial)
         raise
+
+
+def _atomic_write_npz(path: Path, writer: Any) -> None:
+    partial = path.with_name(path.name + ".partial")
+    try:
+        with partial.open("wb") as handle:
+            writer(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(partial, path)
+        _fsync_parent_directory(path)
+    except Exception:
+        _cleanup_partial(partial)
+        raise
+
+
+def _load_previous_stage_state(
+    output_dir: Path,
+    stage: str,
+    artifact_path: Path,
+) -> tuple[bytes | None, bytes | None]:
+    manifest_path = output_dir / "stages" / f"{stage}.json"
+    if not manifest_path.is_file() or not artifact_path.is_file():
+        return None, None
+
+    try:
+        payload = validate_stage(output_dir, stage)
+    except RuntimeError:
+        return None, None
+
+    manifest_artifact = payload.get("artifact", {}).get("path")
+    if manifest_artifact != artifact_path.name:
+        return None, None
+    return artifact_path.read_bytes(), manifest_path.read_bytes()
+
+
+def _restore_stage_state(
+    *,
+    artifact_path: Path,
+    manifest_path: Path,
+    old_artifact_bytes: bytes,
+    old_manifest_bytes: bytes,
+) -> None:
+    artifact_backup = artifact_path.with_name(artifact_path.name + ".backup")
+    manifest_backup = manifest_path.with_name(manifest_path.name + ".backup")
+    try:
+        with artifact_backup.open("wb") as handle:
+            handle.write(old_artifact_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(artifact_backup, artifact_path)
+        _fsync_parent_directory(artifact_path)
+
+        with manifest_backup.open("wb") as handle:
+            handle.write(old_manifest_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(manifest_backup, manifest_path)
+        _fsync_parent_directory(manifest_path)
+    finally:
+        _cleanup_temp(artifact_backup)
+        _cleanup_temp(manifest_backup)
+        _cleanup_temp(artifact_path.with_name(artifact_path.name + ".partial"))
+        _cleanup_temp(manifest_path.with_name(manifest_path.name + ".partial"))
+
+
+def _publish_stage_transactional(
+    *,
+    output_dir: Path,
+    stage: str,
+    artifact_path: Path,
+    write_artifact: Any,
+    build_artifact: Any,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    manifest_path = output_dir / "stages" / f"{stage}.json"
+    old_artifact_bytes, old_manifest_bytes = _load_previous_stage_state(
+        output_dir, stage, artifact_path
+    )
+
+    write_artifact()
+    artifact = build_artifact()
+    try:
+        return _write_stage_manifest(output_dir, stage, artifact, extra)
+    except Exception:
+        if old_artifact_bytes is not None and old_manifest_bytes is not None:
+            _restore_stage_state(
+                artifact_path=artifact_path,
+                manifest_path=manifest_path,
+                old_artifact_bytes=old_artifact_bytes,
+                old_manifest_bytes=old_manifest_bytes,
+            )
+        raise
+    finally:
+        _cleanup_temp(artifact_path.with_name(artifact_path.name + ".backup"))
+        _cleanup_temp(manifest_path.with_name(manifest_path.name + ".backup"))
+        _cleanup_temp(artifact_path.with_name(artifact_path.name + ".partial"))
+        _cleanup_temp(manifest_path.with_name(manifest_path.name + ".partial"))
 
 
 def write_basis_artifact(output_dir: Path, *, basis: np.ndarray) -> dict[str, Any]:
     output_dir = Path(output_dir)
     target = output_dir / "basis.npz"
-    partial = target.with_name(target.name + ".partial")
-    try:
-        with partial.open("wb") as handle:
-            np.savez(handle, basis=np.asarray(basis, dtype=np.uint64))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(partial, target)
-    except Exception:
-        _cleanup_partial(partial)
-        raise
-    artifact = ArtifactMeta(
-        path=target.name,
-        sha256=_sha256(target),
-        shape=[int(np.asarray(basis).shape[0])],
-        dtype=str(np.asarray(basis).dtype),
-        conventions=["sorted-constrained-states"],
+    basis_array = np.asarray(basis, dtype=np.uint64)
+
+    def write_artifact() -> None:
+        _atomic_write_npz(target, lambda handle: np.savez(handle, basis=basis_array))
+
+    def build_artifact() -> ArtifactMeta:
+        return ArtifactMeta(
+            path=target.name,
+            sha256=_sha256(target),
+            shape=[int(basis_array.shape[0])],
+            dtype=str(basis_array.dtype),
+            conventions=["sorted-constrained-states"],
+        )
+
+    return _publish_stage_transactional(
+        output_dir=output_dir,
+        stage="basis",
+        artifact_path=target,
+        write_artifact=write_artifact,
+        build_artifact=build_artifact,
     )
-    return _write_stage_manifest(output_dir, "basis", artifact)
 
 
 def write_hamiltonian_artifact(output_dir: Path, *, hamiltonian: sp.csr_matrix) -> dict[str, Any]:
     output_dir = Path(output_dir)
     target = output_dir / "hamiltonian.csr.npz"
-    partial = target.with_name(target.name + ".partial")
-    try:
-        with partial.open("wb") as handle:
-            sp.save_npz(handle, hamiltonian, compressed=False)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(partial, target)
-    except Exception:
-        _cleanup_partial(partial)
-        raise
-    artifact = ArtifactMeta(
-        path=target.name,
-        sha256=_sha256(target),
-        shape=[int(hamiltonian.shape[0]), int(hamiltonian.shape[1])],
-        dtype=str(hamiltonian.dtype),
-        conventions=["csr-real-symmetric"],
+
+    def write_artifact() -> None:
+        _atomic_write_npz(target, lambda handle: sp.save_npz(handle, hamiltonian, compressed=False))
+
+    def build_artifact() -> ArtifactMeta:
+        return ArtifactMeta(
+            path=target.name,
+            sha256=_sha256(target),
+            shape=[int(hamiltonian.shape[0]), int(hamiltonian.shape[1])],
+            dtype=str(hamiltonian.dtype),
+            conventions=["csr-real-symmetric"],
+        )
+
+    return _publish_stage_transactional(
+        output_dir=output_dir,
+        stage="hamiltonian",
+        artifact_path=target,
+        write_artifact=write_artifact,
+        build_artifact=build_artifact,
+        extra={"nnz": int(hamiltonian.nnz)},
     )
-    return _write_stage_manifest(output_dir, "hamiltonian", artifact, {"nnz": int(hamiltonian.nnz)})
 
 
 def write_eigensystem(
@@ -197,18 +324,29 @@ def write_eigensystem(
                 chunks=(vectors_arr.shape[0], 1),
             )
 
-    _atomic_write_h5(target, writer)
-    artifact = ArtifactMeta(
-        path=target.name,
-        sha256=_sha256(target),
-        shape=[int(energies_arr.shape[0])],
-        dtype=str(energies_arr.dtype),
-        conventions=["eigenvectors-are-columns", "float64", "hdf5"],
-    )
+    def write_artifact() -> None:
+        _atomic_write_h5(target, writer)
+
+    def build_artifact() -> ArtifactMeta:
+        return ArtifactMeta(
+            path=target.name,
+            sha256=_sha256(target),
+            shape=[int(energies_arr.shape[0])],
+            dtype=str(energies_arr.dtype),
+            conventions=["eigenvectors-are-columns", "float64", "hdf5"],
+        )
+
     extra: dict[str, Any] = {"has_vectors": vectors_arr is not None}
     if vectors_arr is not None:
         extra["vector_shape"] = [int(vectors_arr.shape[0]), int(vectors_arr.shape[1])]
-    return _write_stage_manifest(output_dir, "eigensystem", artifact, extra)
+    return _publish_stage_transactional(
+        output_dir=output_dir,
+        stage="eigensystem",
+        artifact_path=target,
+        write_artifact=write_artifact,
+        build_artifact=build_artifact,
+        extra=extra,
+    )
 
 
 def write_observables(output_dir: Path, observables: dict[str, np.ndarray]) -> dict[str, Any]:
@@ -222,20 +360,50 @@ def write_observables(output_dir: Path, observables: dict[str, np.ndarray]) -> d
         for name, array in arrays.items():
             group.create_dataset(name, data=array)
 
-    _atomic_write_h5(target, writer)
-    artifact = ArtifactMeta(
-        path=target.name,
-        sha256=_sha256(target),
-        shape=[sum(int(array.size) for array in arrays.values())],
-        dtype="float64",
-        conventions=["observables-only", "separate-from-eigensystem"],
+    def write_artifact() -> None:
+        _atomic_write_h5(target, writer)
+
+    def build_artifact() -> ArtifactMeta:
+        return ArtifactMeta(
+            path=target.name,
+            sha256=_sha256(target),
+            shape=[sum(int(array.size) for array in arrays.values())],
+            dtype="float64",
+            conventions=["observables-only", "separate-from-eigensystem"],
+        )
+
+    return _publish_stage_transactional(
+        output_dir=output_dir,
+        stage="observables",
+        artifact_path=target,
+        write_artifact=write_artifact,
+        build_artifact=build_artifact,
+        extra={"datasets": sorted(arrays.keys())},
     )
-    return _write_stage_manifest(
-        output_dir,
-        "observables",
-        artifact,
-        {"datasets": sorted(arrays.keys())},
-    )
+
+
+def _resolve_stage_artifact_path(output_dir: Path, stage: str, artifact_path_raw: str) -> Path:
+    artifact_relative = Path(artifact_path_raw)
+    if artifact_relative.is_absolute():
+        raise RuntimeError(f"absolute artifact paths are forbidden: {artifact_path_raw}")
+    if ".." in artifact_relative.parts:
+        raise RuntimeError(f"path traversal is forbidden: {artifact_path_raw}")
+    if len(artifact_relative.parts) != 1:
+        raise RuntimeError(f"nested artifact paths are forbidden: {artifact_path_raw}")
+
+    expected = STAGE_ARTIFACT_NAMES.get(stage)
+    if expected is not None and artifact_relative.name != expected:
+        raise RuntimeError(
+            f"stage/artifact-name mismatch: stage={stage} expected={expected} actual={artifact_relative.name}"
+        )
+
+    output_resolved = output_dir.resolve()
+    artifact_path = (output_dir / artifact_relative).resolve()
+    try:
+        artifact_path.relative_to(output_resolved)
+    except ValueError as exc:
+        raise RuntimeError(f"artifact path escapes output directory: {artifact_path_raw}") from exc
+    return artifact_path
 
 
 def validate_stage(output_dir: Path, stage: str) -> dict[str, Any]:
@@ -251,7 +419,10 @@ def validate_stage(output_dir: Path, stage: str) -> dict[str, Any]:
     artifact = payload.get("artifact")
     if not isinstance(artifact, dict):
         raise RuntimeError(f"stage manifest is missing artifact metadata: {path}")
-    artifact_path = output_dir / str(artifact.get("path", ""))
+    artifact_path_raw = artifact.get("path")
+    if not isinstance(artifact_path_raw, str):
+        raise RuntimeError(f"stage manifest artifact path must be a string: {path}")
+    artifact_path = _resolve_stage_artifact_path(output_dir, stage, artifact_path_raw)
     if not artifact_path.is_file():
         raise RuntimeError(f"stage artifact missing: {artifact_path}")
 

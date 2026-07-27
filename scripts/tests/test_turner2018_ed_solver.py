@@ -20,7 +20,7 @@ def test_l32_dense_resource_estimate():
 def test_dense_solver_rejects_nonsymmetric_input():
     matrix = sp.csr_matrix(np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.float64))
     with pytest.raises(ValueError, match="real symmetric"):
-        solve_full_eigensystem(matrix, vectors=True)
+        solve_full_eigensystem(matrix, vectors=True, declared_memory_bytes=10_000)
 
 
 def test_dense_solver_rejects_insufficient_declared_memory():
@@ -36,7 +36,12 @@ def test_dense_solver_rejects_insufficient_declared_memory():
 
 def test_dense_solver_matches_numpy_l10_with_vectors():
     matrix = _reduced_hamiltonian(10)
-    energies, vectors = solve_full_eigensystem(matrix, vectors=True)
+    estimate = estimate_dense_resources(matrix.shape[0], vectors=True)
+    energies, vectors = solve_full_eigensystem(
+        matrix,
+        vectors=True,
+        declared_memory_bytes=estimate.minimum_requested_bytes,
+    )
     expected_energies, expected_vectors = np.linalg.eigh(matrix.toarray())
 
     assert vectors is not None
@@ -54,8 +59,36 @@ def test_dense_solver_matches_numpy_l10_with_vectors():
 
 def test_dense_solver_vectors_false_returns_no_vectors_and_matches_numpy():
     matrix = _reduced_hamiltonian(10)
-    energies, vectors = solve_full_eigensystem(matrix, vectors=False)
+    estimate = estimate_dense_resources(matrix.shape[0], vectors=False)
+    energies, vectors = solve_full_eigensystem(
+        matrix,
+        vectors=False,
+        declared_memory_bytes=estimate.minimum_requested_bytes,
+    )
     expected_energies = np.linalg.eigvalsh(matrix.toarray())
 
     assert vectors is None
     np.testing.assert_allclose(energies, expected_energies, atol=1e-12, rtol=0.0)
+
+
+def test_dense_solver_requires_declared_memory_argument():
+    matrix = _reduced_hamiltonian(10)
+    with pytest.raises(TypeError):
+        solve_full_eigensystem(matrix, vectors=True)  # type: ignore[call-arg]
+
+
+def test_dense_solver_rejects_before_toarray_when_memory_insufficient(monkeypatch):
+    matrix = _reduced_hamiltonian(10)
+    estimate = estimate_dense_resources(matrix.shape[0], vectors=True)
+
+    def fail_toarray(_self, *args, **kwargs):
+        raise AssertionError("toarray should not be called on memory rejection")
+
+    monkeypatch.setattr(sp.csr_matrix, "toarray", fail_toarray)
+
+    with pytest.raises(MemoryError, match="declared memory"):
+        solve_full_eigensystem(
+            matrix,
+            vectors=True,
+            declared_memory_bytes=estimate.minimum_requested_bytes - 1,
+        )

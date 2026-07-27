@@ -55,12 +55,12 @@ def solve_full_eigensystem(
     matrix: sp.csr_matrix,
     *,
     vectors: bool,
-    declared_memory_bytes: int | None = None,
+    declared_memory_bytes: int,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Solve the full dense eigensystem from a deterministic real symmetric CSR."""
     _validate_real_symmetric_csr(matrix)
     estimate = estimate_dense_resources(matrix.shape[0], vectors=vectors)
-    if declared_memory_bytes is not None and declared_memory_bytes < estimate.minimum_requested_bytes:
+    if declared_memory_bytes < estimate.minimum_requested_bytes:
         raise MemoryError(
             "declared memory is insufficient for dense diagonalization "
             f"({declared_memory_bytes} < {estimate.minimum_requested_bytes})"
