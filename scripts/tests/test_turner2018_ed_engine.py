@@ -22,7 +22,7 @@ def _scalar_reflect(value: int, length: int) -> int:
     reflected = 0
     for index in range(length):
         if (value >> index) & 1:
-            reflected |= 1 << (length - 1 - index)
+            reflected |= 1 << ((-index) % length)
     return reflected
 
 
@@ -62,6 +62,17 @@ def _reference_column_data(length: int):
     return constrained, np.asarray(representatives), np.asarray(orbit_sizes), supports_by_representative
 
 
+def test_scalar_reflect_matches_site_centered_reference_convention():
+    cases = [
+        (8, 0b10110000),
+        (8, 0b00100101),
+        (32, (1 << 31) | (1 << 30) | (1 << 9)),
+        (32, (1 << 31) | (1 << 3) | 1),
+    ]
+    for length, state in cases:
+        assert _scalar_reflect(state, length) == _reflect(state, length)
+
+
 def test_compact_states_match_reference_at_l10():
     actual = enumerate_constrained_states(10)
     expected = constrained_basis(10, pbc=True)
@@ -92,7 +103,7 @@ def test_canonical_dihedral_matches_scalar_dihedral_minimum_l32_high_bits():
             (1 << 31) | (1 << 3) | 1,
             (1 << 30) | (1 << 16) | (1 << 5),
             (1 << 31) | (1 << 30) | (1 << 9),
-            (1 << 31) | (1 << 30) | (1 << 1) | (1 << 0),
+            (1 << 31) | (1 << 30) | (1 << 12),
         ],
         dtype=np.uint64,
     )
@@ -101,6 +112,14 @@ def test_canonical_dihedral_matches_scalar_dihedral_minimum_l32_high_bits():
         [min(_scalar_dihedral_members(int(state), length)) for state in states],
         dtype=np.uint64,
     )
+
+    for state in states:
+        rotations = {_scalar_rotate_left(int(state), shift, length) for shift in range(length)}
+        reflected_rotations = {
+            _scalar_rotate_left(_scalar_reflect(int(state), length), shift, length)
+            for shift in range(length)
+        }
+        assert reflected_rotations - rotations
 
     canonical = canonical_dihedral(states, length)
     assert canonical.dtype == np.uint64
