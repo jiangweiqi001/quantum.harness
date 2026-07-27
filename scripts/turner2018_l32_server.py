@@ -18,13 +18,34 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from turner2018_ed_engine import assemble_reduced_hamiltonian, build_orbit_basis
+
 L32_FULL_DIMENSION = 4_870_847
 L32_SECTOR_DIMENSION = 77_436
 FULL_FSA_SHELLS = 33
 SYMMETRY_FOLDED_FSA_SHELLS = 17
 SCHEMA_VERSION = "turner-l32-ed-fsa-v1"
+LOCAL_EQUIVALENCE_SCHEMA_VERSION = "turner-local-equivalence-v1"
 QUANTUM_MODEL = "H=sum_j P_(j-1) X_j P_(j+1), PBC"
 STAGES = ("plan", "basis", "hamiltonian", "diagonalize", "observables", "all")
+LOCAL_VALIDATION_DIMENSIONS = {
+    10: (123, 14),
+    12: (322, 26),
+    14: (843, 49),
+    16: (2207, 99),
+    18: (5778, 209),
+    20: (15127, 455),
+}
+LOCAL_VALIDATION_TOLERANCES = {
+    "reduced_matrix": 1e-11,
+    "complete_spectrum": 1e-10,
+    "degenerate_total_z2": 1e-10,
+    "degenerate_projector_diagonal": 1e-10,
+    "degenerate_subspace": 1e-10,
+    "fsa_beta": 1e-11,
+    "fsa_projected_shell": 1e-11,
+    "pr2_isolated": 1e-10,
+}
 STAGE_PREDECESSOR = {
     "hamiltonian": "basis",
     "diagonalize": "hamiltonian",
@@ -92,6 +113,52 @@ def _package_versions() -> dict[str, str | None]:
         else:
             versions[name] = str(getattr(module, "__version__", "unknown"))
     return versions
+
+
+def _max_abs_array(values: Any) -> float:
+    import numpy as np
+
+    array = np.asarray(values)
+    return float(np.max(np.abs(array))) if array.size else 0.0
+
+
+def _max_abs_sparse(values: Any) -> float:
+    return _max_abs_array(values.data) if values.nnz else 0.0
+
+
+def _threshold_metric(value: float, tolerance: float) -> dict[str, float | bool]:
+    return {
+        "value": float(value),
+        "tolerance": float(tolerance),
+        "passed": bool(value <= tolerance),
+    }
+
+
+def _dimension_metric(
+    expected: int,
+    candidate: int,
+    reference: int,
+) -> dict[str, int | bool]:
+    return {
+        "expected": int(expected),
+        "candidate": int(candidate),
+        "reference": int(reference),
+        "passed": bool(candidate == reference == expected),
+    }
+
+
+def _source_hashes() -> dict[str, str]:
+    root = Path(__file__).resolve().parent
+    names = (
+        "pxp_ed.py",
+        "turner2018_fig3.py",
+        "turner2018_ed_engine.py",
+        "turner2018_ed_solver.py",
+        "turner2018_ed_observables.py",
+        "turner2018_ed_validation.py",
+        "turner2018_l32_server.py",
+    )
+    return {name: _sha256(root / name) for name in names}
 
 
 def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]:
@@ -367,56 +434,233 @@ def run_observables(length: int, output_dir: Path, chunk_columns: int) -> None:
 def validate_small_l(
     length: int,
     official_data_dir: str | Path | None,
-) -> dict[str, float | int | str]:
-    """Compare staged small-L quantities to the existing ED/FSA implementation."""
+) -> dict[str, Any]:
+    """Compare one independent-engine result to the existing full-basis oracle."""
     import numpy as np
 
-    from turner2018_fig3 import analyze_spectrum
+    from pxp_ed import (
+        basis_state_vector,
+        constrained_basis,
+        density_wave_state,
+        pxp_hamiltonian,
+        symmetry_basis_k0_inversion_even,
+    )
+    from turner2018_ed_observables import (
+        compare_degenerate_invariants,
+        compute_observables,
+        project_product_state,
+    )
+    from turner2018_ed_solver import estimate_dense_resources, solve_full_eigensystem
+    from turner2018_fig3 import fsa_basis
 
-    reference = analyze_spectrum(length)
-    repeated = analyze_spectrum(length)
-    metrics: dict[str, float | int | str] = {
+    if length not in LOCAL_VALIDATION_DIMENSIONS:
+        raise ValueError(
+            "local equivalence validation supports even lengths 10 through 20"
+        )
+    expected_full, expected_sector = LOCAL_VALIDATION_DIMENSIONS[length]
+
+    # Candidate: direct constrained-state enumeration and direct dihedral-orbit
+    # Hamiltonian assembly, followed by the Task 3/4 eigensystem and observables.
+    candidate_basis = build_orbit_basis(length)
+    candidate_matrix = assemble_reduced_hamiltonian(candidate_basis)
+    estimate = estimate_dense_resources(candidate_matrix.shape[0], vectors=True)
+    candidate_energies, candidate_vectors = solve_full_eigensystem(
+        candidate_matrix,
+        vectors=True,
+        declared_memory_bytes=estimate.minimum_requested_bytes,
+    )
+    assert candidate_vectors is not None
+    candidate = compute_observables(
+        candidate_basis,
+        candidate_matrix,
+        candidate_energies,
+        candidate_vectors,
+    )
+
+    # Oracle: the established full-basis pxp_ed transform and Turner Fig. 3 FSA.
+    reference_states = constrained_basis(length, pbc=True)
+    reference_full_matrix = pxp_hamiltonian(reference_states, length, pbc=True)
+    reference_transform = symmetry_basis_k0_inversion_even(reference_states, length)
+    reference_matrix = (
+        reference_transform.T @ reference_full_matrix @ reference_transform
+    ).tocsr()
+    reference_energies, reference_vectors = np.linalg.eigh(reference_matrix.toarray())
+    z2_state = density_wave_state(length, 2)
+    reference_z2_full = basis_state_vector(reference_states, z2_state)
+    reference_z2_sector = np.asarray(
+        reference_transform.T @ reference_z2_full
+    ).ravel()
+    candidate_z2_sector = project_product_state(candidate_basis, z2_state)
+    reference_shells_full, reference_beta = fsa_basis(
+        reference_full_matrix,
+        reference_states,
+        z2_state,
+        length,
+    )
+    reference_shells = np.asarray(
+        reference_transform.T @ reference_shells_full.T
+    ).T[: length // 2 + 1]
+    reference_shells = np.asarray(reference_shells.real, dtype=np.float64)
+    reference_shells /= np.linalg.norm(reference_shells, axis=1, keepdims=True)
+    candidate_shells = np.asarray(
+        candidate["fsa_shell_vectors_sector"],
+        dtype=np.float64,
+    )
+    aligned_candidate_shells = candidate_shells.copy()
+    for shell in range(reference_shells.shape[0]):
+        if np.vdot(reference_shells[shell], aligned_candidate_shells[shell]).real < 0:
+            aligned_candidate_shells[shell] *= -1.0
+
+    matrix_error = _max_abs_sparse(candidate_matrix - reference_matrix)
+    spectrum_error = _max_abs_array(candidate_energies - reference_energies)
+    invariant_error: str | None = None
+    try:
+        invariants = compare_degenerate_invariants(
+            reference_energies=reference_energies,
+            reference_vectors=reference_vectors,
+            candidate_energies=candidate_energies,
+            candidate_vectors=candidate_vectors,
+            reference_z2_sector_state=reference_z2_sector,
+            candidate_z2_sector_state=candidate_z2_sector,
+            tolerance=LOCAL_VALIDATION_TOLERANCES["complete_spectrum"],
+        )
+    except ValueError as error:
+        invariant_error = str(error)
+        failed_value = sys.float_info.max
+        invariants = {
+            "max_total_z2_diff": failed_value,
+            "max_projector_diag_diff": failed_value,
+            "max_subspace_sine": failed_value,
+            "max_pr2_diff_isolated": failed_value,
+            "degenerate_group_count": 0,
+            "isolated_group_count": 0,
+        }
+
+    metrics: dict[str, dict[str, Any]] = {
+        "full_dimension": _dimension_metric(
+            expected_full,
+            len(candidate_basis.constrained_states),
+            len(reference_states),
+        ),
+        "sector_dimension": _dimension_metric(
+            expected_sector,
+            candidate_matrix.shape[0],
+            reference_matrix.shape[0],
+        ),
+        "reduced_matrix": _threshold_metric(
+            matrix_error,
+            LOCAL_VALIDATION_TOLERANCES["reduced_matrix"],
+        ),
+        "complete_spectrum": _threshold_metric(
+            spectrum_error,
+            LOCAL_VALIDATION_TOLERANCES["complete_spectrum"],
+        ),
+        "degenerate_total_z2": _threshold_metric(
+            float(invariants["max_total_z2_diff"]),
+            LOCAL_VALIDATION_TOLERANCES["degenerate_total_z2"],
+        ),
+        "degenerate_projector_diagonal": _threshold_metric(
+            float(invariants["max_projector_diag_diff"]),
+            LOCAL_VALIDATION_TOLERANCES["degenerate_projector_diagonal"],
+        ),
+        "degenerate_subspace": _threshold_metric(
+            float(invariants["max_subspace_sine"]),
+            LOCAL_VALIDATION_TOLERANCES["degenerate_subspace"],
+        ),
+        "fsa_beta": _threshold_metric(
+            _max_abs_array(
+                np.asarray(candidate["fsa_beta_full_chain"]) - reference_beta
+            ),
+            LOCAL_VALIDATION_TOLERANCES["fsa_beta"],
+        ),
+        "fsa_projected_shell": _threshold_metric(
+            _max_abs_array(aligned_candidate_shells - reference_shells),
+            LOCAL_VALIDATION_TOLERANCES["fsa_projected_shell"],
+        ),
+        "pr2_isolated": _threshold_metric(
+            float(invariants["max_pr2_diff_isolated"]),
+            LOCAL_VALIDATION_TOLERANCES["pr2_isolated"],
+        ),
+    }
+    result: dict[str, Any] = {
         "length": length,
-        "sector_matrix_max_abs": float(
-            np.max(
-                np.abs(
-                    reference["fsa_hamiltonian_sector"]
-                    - repeated["fsa_hamiltonian_sector"]
-                )
-            )
-        ),
-        "eigenvalue_max_abs": float(
-            np.max(np.abs(reference["energies"] - repeated["energies"]))
-        ),
-        "overlap_max_abs": float(
-            np.max(np.abs(reference["overlap_z2"] - repeated["overlap_z2"]))
-        ),
-        "fsa_beta_max_abs": float(
-            np.max(
-                np.abs(
-                    reference["fsa_beta_full_chain"]
-                    - repeated["fsa_beta_full_chain"]
-                )
-            )
-        ),
+        "passed": bool(all(metric["passed"] for metric in metrics.values())),
+        "metrics": metrics,
         "full_fsa_shell_count": length + 1,
         "folded_fsa_shell_count": length // 2 + 1,
+        "degenerate_group_count": int(invariants["degenerate_group_count"]),
+        "isolated_group_count": int(invariants["isolated_group_count"]),
+        "pr2_policy": "compared only for isolated one-dimensional eigenspaces",
         "official_data": "not-requested",
     }
+    if invariant_error is not None:
+        result["invariant_error"] = invariant_error
     if official_data_dir is not None:
         official = Path(official_data_dir)
         archive = official / "eigendecomposition.zip"
-        metrics["official_data"] = "available" if archive.is_file() else "missing"
+        result["official_data"] = "available" if archive.is_file() else "missing"
         if not archive.is_file():
             raise RuntimeError(
                 f"official small-L comparison requested but archive is missing: {archive}"
             )
-    return metrics
+    return result
+
+
+def run_local_validation(
+    lengths: list[int],
+    output_dir: Path,
+    official_data_dir: Path | None,
+    invocation: list[str],
+) -> tuple[Path, dict[str, Any]]:
+    """Run every requested local comparison and atomically publish one gate."""
+    results: list[dict[str, Any]] = []
+    for length in lengths:
+        try:
+            result = validate_small_l(length, official_data_dir)
+        except Exception as error:  # fail closed while preserving the complete gate
+            result = {
+                "length": length,
+                "passed": False,
+                "metrics": {
+                    "execution": {
+                        "passed": False,
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                },
+            }
+        results.append(result)
+    passed = bool(results) and all(result["passed"] for result in results)
+    summary = {
+        "schema_version": LOCAL_EQUIVALENCE_SCHEMA_VERSION,
+        "status": "passed" if passed else "failed",
+        "passed": passed,
+        "requested_lengths": lengths,
+        "results": results,
+        "artifact_hashes": _source_hashes(),
+        "provenance": {
+            "invocation": invocation,
+            "git_revision": _git_revision(),
+            "python": sys.version,
+            "platform": platform.platform(),
+            "packages": _package_versions(),
+            "candidate_engine": (
+                "turner2018_ed_engine direct dihedral-orbit assembly with "
+                "turner2018_ed_solver and external-eigensystem observables"
+            ),
+            "reference_engine": (
+                "pxp_ed full constrained basis transformed by "
+                "symmetry_basis_k0_inversion_even with turner2018_fig3 FSA"
+            ),
+        },
+    }
+    path = output_dir / "validation" / "local-equivalence.json"
+    atomic_write_json(path, summary)
+    return path, summary
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=STAGES, required=True)
+    parser.add_argument("--stage", choices=STAGES)
     parser.add_argument("--length", type=int, default=32)
     parser.add_argument(
         "--output-dir",
@@ -426,6 +670,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--chunk-columns", type=int, default=32)
     parser.add_argument("--validate-small-l", type=int)
+    parser.add_argument("--validate-local", type=int, nargs="+")
     parser.add_argument("--official-data-dir", type=Path)
     return parser
 
@@ -433,6 +678,26 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     invoked = list(argv) if argv is not None else sys.argv[1:]
+    if args.validate_local is not None:
+        invalid = [
+            length
+            for length in args.validate_local
+            if length not in LOCAL_VALIDATION_DIMENSIONS
+        ]
+        if invalid:
+            raise SystemExit(
+                "--validate-local supports every even length from 10 through 20"
+            )
+        path, summary = run_local_validation(
+            args.validate_local,
+            args.output_dir,
+            args.official_data_dir,
+            invoked,
+        )
+        print(path, flush=True)
+        return 0 if summary["passed"] else 1
+    if args.stage is None:
+        raise SystemExit("--stage is required unless --validate-local is used")
     if args.length < 4 or args.length % 2:
         raise SystemExit("--length must be an even integer >= 4")
     if args.chunk_columns < 1:

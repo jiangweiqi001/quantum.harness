@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
@@ -21,6 +22,7 @@ from turner2018_l32_server import (  # noqa: E402
     SYMMETRY_FOLDED_FSA_SHELLS,
     atomic_write_json,
     dense_resource_estimate,
+    main,
     require_stage,
 )
 
@@ -143,16 +145,106 @@ class TurnerL32SlurmTests(unittest.TestCase):
     "local NumPy/SciPy stack is not installed",
 )
 class TurnerSmallLEquivalenceTests(unittest.TestCase):
-    def test_small_l_reference_stage_matches_existing_implementation(self):
-        from turner2018_l32_server import validate_small_l
+    def test_small_l_gate_detects_perturbed_independent_matrix(self):
+        import turner2018_l32_server as server
 
-        metrics = validate_small_l(10, official_data_dir=None)
-        self.assertLess(metrics["sector_matrix_max_abs"], 1e-12)
-        self.assertLess(metrics["eigenvalue_max_abs"], 1e-12)
-        self.assertLess(metrics["overlap_max_abs"], 1e-12)
-        self.assertLess(metrics["fsa_beta_max_abs"], 1e-12)
-        self.assertEqual(metrics["full_fsa_shell_count"], 11)
-        self.assertEqual(metrics["folded_fsa_shell_count"], 6)
+        original = server.assemble_reduced_hamiltonian
+
+        def perturbed(basis):
+            matrix = original(basis).tolil()
+            matrix[0, 1] += 1e-6
+            matrix[1, 0] += 1e-6
+            return matrix.tocsr()
+
+        with mock.patch.object(server, "assemble_reduced_hamiltonian", perturbed):
+            result = server.validate_small_l(10, official_data_dir=None)
+
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["metrics"]["reduced_matrix"]["passed"])
+        self.assertGreater(result["metrics"]["reduced_matrix"]["value"], 1e-11)
+
+    def test_validate_local_cli_writes_failed_atomic_gate_and_returns_nonzero(self):
+        failed = {
+            "length": 12,
+            "passed": False,
+            "metrics": {
+                "complete_spectrum": {
+                    "value": 2e-10,
+                    "tolerance": 1e-10,
+                    "passed": False,
+                }
+            },
+        }
+        passed = {
+            "length": 10,
+            "passed": True,
+            "metrics": {
+                "complete_spectrum": {
+                    "value": 0.0,
+                    "tolerance": 1e-10,
+                    "passed": True,
+                }
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch(
+                "turner2018_l32_server.validate_small_l",
+                side_effect=[passed, failed],
+            ):
+                return_code = main(
+                    [
+                        "--validate-local",
+                        "10",
+                        "12",
+                        "--output-dir",
+                        directory,
+                    ]
+                )
+
+            summary_path = Path(directory) / "validation" / "local-equivalence.json"
+            summary = json.loads(summary_path.read_text())
+            self.assertEqual(return_code, 1)
+            self.assertEqual(summary["status"], "failed")
+            self.assertFalse(summary["passed"])
+            self.assertEqual(summary["requested_lengths"], [10, 12])
+            self.assertFalse(summary["results"][1]["metrics"]["complete_spectrum"]["passed"])
+            self.assertIn("artifact_hashes", summary)
+            self.assertIn("provenance", summary)
+            self.assertFalse(summary_path.with_name(summary_path.name + ".partial").exists())
+
+    def test_validate_local_cli_runs_every_requested_even_length(self):
+        lengths = [10, 12, 14, 16, 18, 20]
+
+        def passing(length, official_data_dir):
+            return {"length": length, "passed": True, "metrics": {}}
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch(
+                "turner2018_l32_server.validate_small_l",
+                side_effect=passing,
+            ) as validate:
+                return_code = main(
+                    [
+                        "--validate-local",
+                        *(str(length) for length in lengths),
+                        "--output-dir",
+                        directory,
+                    ]
+                )
+
+            self.assertEqual(return_code, 0)
+            self.assertEqual(
+                [call.args[0] for call in validate.call_args_list],
+                lengths,
+            )
+            summary = json.loads(
+                (
+                    Path(directory) / "validation" / "local-equivalence.json"
+                ).read_text()
+            )
+            self.assertEqual(summary["status"], "passed")
+            self.assertTrue(summary["passed"])
 
 
 if __name__ == "__main__":
