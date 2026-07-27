@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import operator
 
 import numpy as np
 import scipy.sparse as sp
@@ -11,47 +12,99 @@ from pxp_ed import density_wave_state
 from turner2018_ed_engine import OrbitBasis, assemble_reduced_hamiltonian, canonical_dihedral
 
 
-def _orbit_projection_data(basis: OrbitBasis) -> tuple[np.ndarray, np.ndarray]:
-    canonical = canonical_dihedral(basis.constrained_states, basis.length)
-    orbit_index_by_state = basis.index_of(canonical).astype(np.int64, copy=False)
-    inverse_sqrt_orbit_sizes = 1.0 / np.sqrt(basis.orbit_sizes.astype(np.float64))
-    return orbit_index_by_state, inverse_sqrt_orbit_sizes
+_BYTE_POPCOUNT = np.asarray([value.bit_count() for value in range(256)], dtype=np.uint8)
 
 
-def _project_full_vector_with_data(
+def _validate_chunk_size(chunk_size: int) -> int:
+    if isinstance(chunk_size, (bool, np.bool_)):
+        raise TypeError("chunk_size must be a positive integer")
+    try:
+        value = operator.index(chunk_size)
+    except TypeError as error:
+        raise TypeError("chunk_size must be a positive integer") from error
+    if value < 1:
+        raise ValueError("chunk_size must be a positive integer")
+    return value
+
+
+def _validate_max_shell(max_shell: int | None, length: int) -> int:
+    if max_shell is None:
+        return length
+    if isinstance(max_shell, (bool, np.bool_)):
+        raise TypeError("max_shell must be an integer in [0, L]")
+    try:
+        value = operator.index(max_shell)
+    except TypeError as error:
+        raise TypeError("max_shell must be an integer in [0, L]") from error
+    if not 0 <= value <= length:
+        raise ValueError("max_shell must be an integer in [0, L]")
+    return value
+
+
+def _hamming_distances_chunked(
+    states: np.ndarray,
+    initial_state: int,
+    *,
+    chunk_size: int,
+) -> np.ndarray:
+    distances = np.empty(states.size, dtype=np.uint8)
+    initial = np.uint64(initial_state)
+    for start in range(0, states.size, chunk_size):
+        stop = min(start + chunk_size, states.size)
+        xor_bytes = np.ascontiguousarray(states[start:stop] ^ initial).view(np.uint8)
+        xor_bytes = xor_bytes.reshape(stop - start, np.dtype(np.uint64).itemsize)
+        distances[start:stop] = np.sum(
+            _BYTE_POPCOUNT[xor_bytes],
+            axis=1,
+            dtype=np.uint8,
+        )
+    return distances
+
+
+def _project_full_vector_chunked(
+    basis: OrbitBasis,
     full_vector: np.ndarray,
     *,
-    orbit_index_by_state: np.ndarray,
-    inverse_sqrt_orbit_sizes: np.ndarray,
+    chunk_size: int,
 ) -> np.ndarray:
-    weighted = np.bincount(
-        orbit_index_by_state,
-        weights=np.asarray(full_vector, dtype=np.float64),
-        minlength=inverse_sqrt_orbit_sizes.shape[0],
-    )
-    return weighted * inverse_sqrt_orbit_sizes
+    states = np.asarray(basis.constrained_states, dtype=np.uint64)
+    projected = np.zeros(len(basis.representatives), dtype=np.float64)
+    for start in range(0, states.size, chunk_size):
+        stop = min(start + chunk_size, states.size)
+        amplitudes = full_vector[start:stop]
+        canonical = canonical_dihedral(states[start:stop], basis.length)
+        orbit_indices = basis.index_of(canonical)
+        np.add.at(projected, orbit_indices, amplitudes)
+    projected /= np.sqrt(basis.orbit_sizes.astype(np.float64))
+    return projected
 
 
-def project_product_state(basis: OrbitBasis, product_state: int) -> np.ndarray:
+def project_product_state(
+    basis: OrbitBasis,
+    product_state: int,
+    *,
+    chunk_size: int = 262144,
+) -> np.ndarray:
     """Project one constrained product state into the orbit basis."""
+    _validate_chunk_size(chunk_size)
     states = basis.constrained_states
     position = int(np.searchsorted(states, np.uint64(product_state)))
     if position >= len(states) or int(states[position]) != int(product_state):
         raise ValueError("product_state must belong to the constrained basis")
 
-    full_vector = np.zeros(len(states), dtype=np.float64)
-    full_vector[position] = 1.0
-    orbit_index_by_state, inverse_sqrt_orbit_sizes = _orbit_projection_data(basis)
-    return _project_full_vector_with_data(
-        full_vector,
-        orbit_index_by_state=orbit_index_by_state,
-        inverse_sqrt_orbit_sizes=inverse_sqrt_orbit_sizes,
+    canonical = canonical_dihedral(
+        np.asarray([np.uint64(product_state)]),
+        basis.length,
     )
+    orbit_index = int(basis.index_of(canonical)[0])
+    projected = np.zeros(len(basis.representatives), dtype=np.float64)
+    projected[orbit_index] = 1.0 / np.sqrt(float(basis.orbit_sizes[orbit_index]))
+    return projected
 
 
 def stream_pr2(vectors: np.ndarray, chunk_columns: int = 256) -> np.ndarray:
     """Compute PR2 column-wise using bounded temporary memory."""
-    array = np.asarray(vectors, dtype=np.float64)
+    array = np.asarray(vectors)
     if array.ndim == 1:
         return np.asarray([np.sum(np.abs(array) ** 4)], dtype=np.float64)
     if array.ndim != 2:
@@ -75,6 +128,10 @@ class StreamedFSAResult:
     full_dimension: int
     reduced_dimension: int
     full_buffer_shape: tuple[int, ...]
+    chunk_size: int
+    max_source_chunk: int
+    max_projection_chunk: int
+    distance_dtype: str
 
 
 def stream_fsa_shells(
@@ -83,10 +140,10 @@ def stream_fsa_shells(
     *,
     reduced_hamiltonian: sp.csr_matrix | np.ndarray | None = None,
     max_shell: int | None = None,
+    chunk_size: int = 262144,
 ) -> StreamedFSAResult:
     """Stream FSA shells on the full constrained basis and project each shell."""
-    if max_shell is not None and max_shell < 0:
-        raise ValueError("max_shell must be non-negative when provided")
+    chunk_size = _validate_chunk_size(chunk_size)
 
     states = np.asarray(basis.constrained_states, dtype=np.uint64)
     full_dimension = len(states)
@@ -95,7 +152,7 @@ def stream_fsa_shells(
         raise ValueError("initial_state must belong to the constrained basis")
 
     length = basis.length
-    shell_limit = length if max_shell is None else min(int(max_shell), length)
+    shell_limit = _validate_max_shell(max_shell, length)
     projected_shell_count = min(length // 2 + 1, shell_limit + 1)
     reduced_dimension = len(basis.representatives)
     projected_shells = np.zeros(
@@ -104,20 +161,21 @@ def stream_fsa_shells(
     )
     beta = np.empty(shell_limit, dtype=np.float64)
 
-    orbit_index_by_state, inverse_sqrt_orbit_sizes = _orbit_projection_data(basis)
-    distances = np.asarray(
-        [(int(state) ^ int(initial_state)).bit_count() for state in states],
-        dtype=np.int16,
+    distances = _hamming_distances_chunked(
+        states,
+        initial_state,
+        chunk_size=chunk_size,
     )
 
     current = np.zeros(full_dimension, dtype=np.float64)
     next_shell = np.zeros(full_dimension, dtype=np.float64)
     current[position] = 1.0
+    max_source_chunk = 0
 
-    shell0 = _project_full_vector_with_data(
+    shell0 = _project_full_vector_chunked(
+        basis,
         current,
-        orbit_index_by_state=orbit_index_by_state,
-        inverse_sqrt_orbit_sizes=inverse_sqrt_orbit_sizes,
+        chunk_size=chunk_size,
     )
     shell0_norm = float(np.linalg.norm(shell0))
     if shell0_norm < 1e-14:
@@ -126,25 +184,53 @@ def stream_fsa_shells(
 
     for shell in range(shell_limit):
         next_shell.fill(0.0)
-        support = np.flatnonzero(np.abs(current) > 0.0)
-        for source_index in support:
-            source_state = int(states[source_index])
-            source_distance = int(distances[source_index])
-            amplitude = float(current[source_index])
+        for start in range(0, full_dimension, chunk_size):
+            stop = min(start + chunk_size, full_dimension)
+            chunk_amplitudes = current[start:stop]
+            support = np.flatnonzero(chunk_amplitudes)
+            if support.size == 0:
+                continue
+            max_source_chunk = max(max_source_chunk, int(support.size))
+            source_states = states[start:stop][support]
+            source_distances = distances[start:stop][support]
+            source_amplitudes = chunk_amplitudes[support]
+
             for site in range(length):
                 left = (site - 1) % length
                 right = (site + 1) % length
-                if ((source_state >> left) & 1) or ((source_state >> right) & 1):
+                legal = (
+                    ((source_states >> np.uint64(left)) & np.uint64(1)) == 0
+                ) & (
+                    ((source_states >> np.uint64(right)) & np.uint64(1)) == 0
+                )
+                if not np.any(legal):
                     continue
-                destination_state = source_state ^ (1 << site)
-                destination_index = int(np.searchsorted(states, np.uint64(destination_state)))
-                if destination_index >= full_dimension:
+                destination_states = (
+                    source_states[legal] ^ (np.uint64(1) << np.uint64(site))
+                )
+                destination_indices = np.searchsorted(states, destination_states)
+                in_basis = destination_indices < full_dimension
+                if not np.any(in_basis):
                     continue
-                if int(states[destination_index]) != destination_state:
+                destination_states = destination_states[in_basis]
+                destination_indices = destination_indices[in_basis]
+                source_legal_indices = np.flatnonzero(legal)[in_basis]
+                exact_match = states[destination_indices] == destination_states
+                if not np.any(exact_match):
                     continue
-                if int(distances[destination_index]) != source_distance + 1:
+                destination_indices = destination_indices[exact_match]
+                source_legal_indices = source_legal_indices[exact_match]
+                increases_distance = (
+                    distances[destination_indices]
+                    == source_distances[source_legal_indices] + np.uint8(1)
+                )
+                if not np.any(increases_distance):
                     continue
-                next_shell[destination_index] += amplitude
+                np.add.at(
+                    next_shell,
+                    destination_indices[increases_distance],
+                    source_amplitudes[source_legal_indices[increases_distance]],
+                )
 
         norm = float(np.linalg.norm(next_shell))
         if norm < 1e-14:
@@ -154,10 +240,10 @@ def stream_fsa_shells(
 
         projected_index = shell + 1
         if projected_index < projected_shell_count:
-            projected = _project_full_vector_with_data(
+            projected = _project_full_vector_chunked(
+                basis,
                 next_shell,
-                orbit_index_by_state=orbit_index_by_state,
-                inverse_sqrt_orbit_sizes=inverse_sqrt_orbit_sizes,
+                chunk_size=chunk_size,
             )
             projected_norm = float(np.linalg.norm(projected))
             if projected_norm < 1e-14:
@@ -166,12 +252,16 @@ def stream_fsa_shells(
         current, next_shell = next_shell, current
 
     if reduced_hamiltonian is None:
-        reduced_dense = assemble_reduced_hamiltonian(basis).toarray()
-    elif sp.issparse(reduced_hamiltonian):
-        reduced_dense = reduced_hamiltonian.toarray()
+        reduced_matrix = assemble_reduced_hamiltonian(basis)
     else:
-        reduced_dense = np.asarray(reduced_hamiltonian, dtype=np.float64)
-    reduced_fsa_hamiltonian = projected_shells @ reduced_dense @ projected_shells.T
+        reduced_matrix = reduced_hamiltonian
+    if reduced_matrix.shape != (reduced_dimension, reduced_dimension):
+        raise ValueError("reduced_hamiltonian shape must match the orbit basis")
+    if sp.issparse(reduced_matrix):
+        h_shells = reduced_matrix @ projected_shells.T
+    else:
+        h_shells = np.asarray(reduced_matrix) @ projected_shells.T
+    reduced_fsa_hamiltonian = projected_shells @ h_shells
     reduced_fsa_hamiltonian = 0.5 * (reduced_fsa_hamiltonian + reduced_fsa_hamiltonian.T)
 
     return StreamedFSAResult(
@@ -181,6 +271,10 @@ def stream_fsa_shells(
         full_dimension=full_dimension,
         reduced_dimension=reduced_dimension,
         full_buffer_shape=current.shape,
+        chunk_size=chunk_size,
+        max_source_chunk=max_source_chunk,
+        max_projection_chunk=min(chunk_size, full_dimension),
+        distance_dtype=distances.dtype.name,
     )
 
 
@@ -190,27 +284,80 @@ def compare_degenerate_invariants(
     reference_vectors: np.ndarray,
     candidate_energies: np.ndarray,
     candidate_vectors: np.ndarray,
-    z2_sector_state: np.ndarray,
+    reference_z2_sector_state: np.ndarray,
+    candidate_z2_sector_state: np.ndarray,
     tolerance: float = 1e-10,
 ) -> dict[str, float | int]:
-    """Compare eigensystems with degeneracy-safe Z2/projector invariants."""
-    energies_ref = np.asarray(reference_energies, dtype=np.float64)
-    energies_candidate = np.asarray(candidate_energies, dtype=np.float64)
-    vectors_ref = np.asarray(reference_vectors, dtype=np.float64)
-    vectors_candidate = np.asarray(candidate_vectors, dtype=np.float64)
-    z2 = np.asarray(z2_sector_state, dtype=np.float64)
+    """Compare complete eigenspaces with basis-invariant principal angles."""
+    if (
+        isinstance(tolerance, (bool, np.bool_))
+        or not np.isscalar(tolerance)
+        or not np.isfinite(tolerance)
+        or tolerance <= 0
+    ):
+        raise ValueError("tolerance must be finite and positive")
 
+    raw_energies_ref = np.asarray(reference_energies)
+    raw_energies_candidate = np.asarray(candidate_energies)
+    if np.iscomplexobj(raw_energies_ref) or np.iscomplexobj(raw_energies_candidate):
+        raise ValueError("energy arrays must be real")
+    energies_ref = np.asarray(raw_energies_ref, dtype=np.float64)
+    energies_candidate = np.asarray(raw_energies_candidate, dtype=np.float64)
+    for name, energies in (
+        ("reference", energies_ref),
+        ("candidate", energies_candidate),
+    ):
+        if energies.ndim != 1:
+            raise ValueError(f"{name} energies must be one-dimensional")
+        if energies.size == 0:
+            raise ValueError(f"{name} energies must be non-empty")
+        if not np.all(np.isfinite(energies)):
+            raise ValueError(f"{name} energies must be finite")
+        if np.any(np.diff(energies) < 0):
+            raise ValueError(f"{name} energies must be sorted")
     if energies_ref.shape != energies_candidate.shape:
         raise ValueError("reference and candidate energies must have the same shape")
-    if vectors_ref.shape != vectors_candidate.shape:
-        raise ValueError("reference and candidate vectors must have the same shape")
-    if vectors_ref.shape[0] != z2.shape[0]:
-        raise ValueError("z2_sector_state size must match vector rows")
+
+    vectors_ref = np.asarray(reference_vectors)
+    vectors_candidate = np.asarray(candidate_vectors)
+    for name, vectors, energies in (
+        ("reference", vectors_ref, energies_ref),
+        ("candidate", vectors_candidate, energies_candidate),
+    ):
+        if vectors.ndim != 2:
+            raise ValueError(f"{name} vectors must be two-dimensional")
+        if vectors.shape[1] != energies.size:
+            raise ValueError(f"{name} vector columns must match energies")
+        if not np.all(np.isfinite(vectors)):
+            raise ValueError(f"{name} vectors must be finite")
+        gram = vectors.conj().T @ vectors
+        orthogonality_error = float(
+            np.max(np.abs(gram - np.eye(vectors.shape[1], dtype=gram.dtype)))
+        )
+        if orthogonality_error > tolerance:
+            raise ValueError(f"{name} vectors must be orthonormal")
+    if vectors_ref.shape[0] != vectors_candidate.shape[0]:
+        raise ValueError("reference and candidate vector row dimensions must match")
+
+    z2_ref = np.asarray(reference_z2_sector_state)
+    z2_candidate = np.asarray(candidate_z2_sector_state)
+    for name, z2 in (("reference", z2_ref), ("candidate", z2_candidate)):
+        if z2.ndim != 1 or z2.shape[0] != vectors_ref.shape[0]:
+            raise ValueError(f"{name} Z2 state must match vector rows")
+        if not np.all(np.isfinite(z2)):
+            raise ValueError(f"{name} Z2 state must be finite")
+    if not np.allclose(z2_ref, z2_candidate, atol=tolerance, rtol=0.0):
+        raise ValueError("reference and candidate Z2 states must match")
+
+    reference_boundaries = np.diff(energies_ref) > tolerance
+    candidate_boundaries = np.diff(energies_candidate) > tolerance
+    if not np.array_equal(reference_boundaries, candidate_boundaries):
+        raise ValueError("reference and candidate degeneracy partitions must match")
     if not np.allclose(energies_ref, energies_candidate, atol=tolerance, rtol=0.0):
         raise ValueError("reference and candidate energies must agree within tolerance")
 
-    overlap_ref = np.abs(vectors_ref.T @ z2) ** 2
-    overlap_candidate = np.abs(vectors_candidate.T @ z2) ** 2
+    overlap_ref = np.abs(vectors_ref.conj().T @ z2_ref) ** 2
+    overlap_candidate = np.abs(vectors_candidate.conj().T @ z2_candidate) ** 2
     pr2_ref = stream_pr2(vectors_ref)
     pr2_candidate = stream_pr2(vectors_candidate)
 
@@ -223,6 +370,7 @@ def compare_degenerate_invariants(
 
     max_total_z2_diff = 0.0
     max_projector_diag_diff = 0.0
+    max_subspace_sine = 0.0
     max_pr2_diff_isolated = 0.0
     degenerate_groups = 0
     isolated_groups = 0
@@ -240,6 +388,12 @@ def compare_degenerate_invariants(
         )
         max_projector_diag_diff = max(max_projector_diag_diff, projector_diag_diff)
 
+        cross_gram = vectors_ref[:, group].conj().T @ vectors_candidate[:, group]
+        singular_values = np.linalg.svd(cross_gram, compute_uv=False)
+        smallest_cosine = float(np.clip(np.min(singular_values), 0.0, 1.0))
+        subspace_sine = float(np.sqrt(max(0.0, 1.0 - smallest_cosine**2)))
+        max_subspace_sine = max(max_subspace_sine, subspace_sine)
+
         if len(group) == 1:
             isolated_groups += 1
             pr2_diff = abs(float(pr2_ref[group[0]] - pr2_candidate[group[0]]))
@@ -250,6 +404,7 @@ def compare_degenerate_invariants(
     return {
         "max_total_z2_diff": max_total_z2_diff,
         "max_projector_diag_diff": max_projector_diag_diff,
+        "max_subspace_sine": max_subspace_sine,
         "max_pr2_diff_isolated": max_pr2_diff_isolated,
         "degenerate_group_count": degenerate_groups,
         "isolated_group_count": isolated_groups,
@@ -259,52 +414,88 @@ def compare_degenerate_invariants(
 def compute_observables(
     basis: OrbitBasis,
     reduced_hamiltonian: sp.csr_matrix | np.ndarray,
+    energies: np.ndarray,
+    eigenvectors: np.ndarray,
     *,
     z2_pattern: int = 2,
-) -> dict[str, np.ndarray | dict[str, float | int]]:
-    """Compute overlap/PR2/FSA observables in the reduced orbit basis."""
-    initial_state = density_wave_state(basis.length, z2_pattern)
-    z2_sector = project_product_state(basis, initial_state)
+    chunk_size: int = 262144,
+) -> dict[str, np.ndarray]:
+    """Compute observables from a validated Task 3 eigensystem without solving."""
+    chunk_size = _validate_chunk_size(chunk_size)
+    representatives = np.asarray(basis.representatives)
+    orbit_sizes = np.asarray(basis.orbit_sizes)
+    constrained_states = np.asarray(basis.constrained_states)
+    if (
+        representatives.ndim != 1
+        or orbit_sizes.ndim != 1
+        or constrained_states.ndim != 1
+        or representatives.size != orbit_sizes.size
+    ):
+        raise ValueError("basis arrays have inconsistent dimensions")
 
-    reduced_dense = (
-        reduced_hamiltonian.toarray()
+    reduced_dimension = representatives.size
+    if reduced_hamiltonian.ndim != 2 or reduced_hamiltonian.shape != (
+        reduced_dimension,
+        reduced_dimension,
+    ):
+        raise ValueError("Hamiltonian dimensions must match the orbit basis")
+    matrix_values = (
+        reduced_hamiltonian.data
         if sp.issparse(reduced_hamiltonian)
-        else np.asarray(reduced_hamiltonian, dtype=np.float64)
+        else np.asarray(reduced_hamiltonian)
     )
-    energies, eigenvectors = np.linalg.eigh(reduced_dense)
-    overlap_z2 = np.abs(eigenvectors.T @ z2_sector) ** 2
-    pr2 = stream_pr2(eigenvectors)
+    if not np.all(np.isfinite(matrix_values)):
+        raise ValueError("Hamiltonian values must be finite")
+
+    energy_array = np.asarray(energies)
+    if np.iscomplexobj(energy_array):
+        raise ValueError("energies must be real")
+    energy_array = np.asarray(energy_array, dtype=np.float64)
+    if energy_array.ndim != 1 or energy_array.size != reduced_dimension:
+        raise ValueError("energies must be one-dimensional and match the basis")
+    if not np.all(np.isfinite(energy_array)):
+        raise ValueError("energies must be finite")
+    if np.any(np.diff(energy_array) < 0):
+        raise ValueError("energies must be sorted")
+
+    vector_array = np.asarray(eigenvectors)
+    if vector_array.ndim != 2 or vector_array.shape != (
+        reduced_dimension,
+        reduced_dimension,
+    ):
+        raise ValueError("eigenvectors dimensions must match the basis and energies")
+    if not np.all(np.isfinite(vector_array)):
+        raise ValueError("eigenvectors must be finite")
+    gram = vector_array.conj().T @ vector_array
+    if float(np.max(np.abs(gram - np.eye(reduced_dimension)))) > 1e-10:
+        raise ValueError("eigenvectors must be orthonormal")
+
+    initial_state = density_wave_state(basis.length, z2_pattern)
+    z2_sector = project_product_state(
+        basis,
+        initial_state,
+        chunk_size=chunk_size,
+    )
+    overlap_z2 = np.abs(vector_array.conj().T @ z2_sector) ** 2
+    pr2 = stream_pr2(vector_array)
 
     streamed_fsa = stream_fsa_shells(
         basis,
         initial_state,
-        reduced_hamiltonian=reduced_dense,
+        reduced_hamiltonian=reduced_hamiltonian,
+        chunk_size=chunk_size,
     )
-    fsa_energies, fsa_eigenvectors = np.linalg.eigh(streamed_fsa.reduced_fsa_hamiltonian)
-    z2_norm = float(np.vdot(z2_sector, z2_sector).real)
-    fsa_overlap_z2 = z2_norm * np.abs(fsa_eigenvectors[0, :]) ** 2
 
-    exact_shell_amplitudes = streamed_fsa.projected_shells @ eigenvectors
-    invariants = compare_degenerate_invariants(
-        reference_energies=energies,
-        reference_vectors=eigenvectors,
-        candidate_energies=energies,
-        candidate_vectors=eigenvectors,
-        z2_sector_state=z2_sector,
-    )
+    exact_shell_amplitudes = streamed_fsa.projected_shells @ vector_array
     return {
-        "energies": np.asarray(energies, dtype=np.float64),
-        "eigenvectors": np.asarray(eigenvectors, dtype=np.float64),
+        "energies": energy_array,
+        "eigenvectors": vector_array,
         "overlap_z2": np.asarray(overlap_z2, dtype=np.float64),
         "participation_ratio": np.asarray(pr2, dtype=np.float64),
-        "fsa_energies": np.asarray(fsa_energies, dtype=np.float64),
-        "fsa_overlap_z2": np.asarray(fsa_overlap_z2, dtype=np.float64),
-        "fsa_eigenvectors": np.asarray(fsa_eigenvectors, dtype=np.float64),
-        "exact_shell_amplitudes": np.asarray(exact_shell_amplitudes, dtype=np.float64),
+        "exact_shell_amplitudes": np.asarray(exact_shell_amplitudes),
         "fsa_shell_vectors_sector": np.asarray(streamed_fsa.projected_shells, dtype=np.float64),
         "fsa_hamiltonian_sector": np.asarray(
             streamed_fsa.reduced_fsa_hamiltonian, dtype=np.float64
         ),
         "fsa_beta_full_chain": np.asarray(streamed_fsa.beta, dtype=np.float64),
-        "invariant_diagnostics": invariants,
     }

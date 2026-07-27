@@ -1,6 +1,11 @@
+import ast
+import inspect
+
 import numpy as np
 import pytest
+import scipy.sparse as sp
 
+import turner2018_ed_observables as observables_module
 from pxp_ed import (
     constrained_basis,
     density_wave_state,
@@ -10,6 +15,7 @@ from pxp_ed import (
 from turner2018_ed_engine import assemble_reduced_hamiltonian, build_orbit_basis
 from turner2018_ed_observables import (
     compare_degenerate_invariants,
+    compute_observables,
     project_product_state,
     stream_fsa_shells,
     stream_pr2,
@@ -22,6 +28,22 @@ def _align_global_sign(reference: np.ndarray, candidate: np.ndarray) -> np.ndarr
     if overlap < 0.0:
         return -candidate
     return candidate
+
+
+def _apply_shell_sign_similarity(
+    hamiltonian: np.ndarray,
+    shell_signs: np.ndarray,
+) -> np.ndarray:
+    return shell_signs[:, None] * hamiltonian * shell_signs[None, :]
+
+
+def test_shell_sign_similarity_transform_changes_signed_offdiagonals():
+    hamiltonian = np.asarray([[0.0, 2.0], [2.0, 0.0]])
+    signs = np.asarray([1.0, -1.0])
+    np.testing.assert_array_equal(
+        _apply_shell_sign_similarity(hamiltonian, signs),
+        np.asarray([[0.0, -2.0], [-2.0, 0.0]]),
+    )
 
 
 def _oracle_project_shells(length: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -56,6 +78,16 @@ def test_streamed_pr2_matches_definition():
     )
 
 
+def test_streamed_pr2_preserves_complex_coefficients():
+    vectors = np.asarray(
+        [[1.0j / np.sqrt(2.0), 0.5 + 0.5j], [1.0 / np.sqrt(2.0), 0.5 - 0.5j]]
+    )
+    np.testing.assert_allclose(
+        stream_pr2(vectors, chunk_columns=1),
+        np.sum(np.abs(vectors) ** 4, axis=0),
+    )
+
+
 @pytest.mark.parametrize("length", [10, 12, 14, 16])
 def test_streamed_fsa_matches_full_basis_oracle(length: int):
     orbit = build_orbit_basis(length)
@@ -65,10 +97,13 @@ def test_streamed_fsa_matches_full_basis_oracle(length: int):
 
     np.testing.assert_allclose(streamed.beta, oracle_beta, atol=1e-12, rtol=0.0)
 
+    shell_signs = np.ones(oracle_shells.shape[0], dtype=np.float64)
     for shell_index in range(oracle_shells.shape[0]):
         aligned = _align_global_sign(
             oracle_shells[shell_index], streamed.projected_shells[shell_index]
         )
+        if np.dot(oracle_shells[shell_index], streamed.projected_shells[shell_index]) < 0:
+            shell_signs[shell_index] = -1.0
         np.testing.assert_allclose(
             aligned,
             oracle_shells[shell_index],
@@ -78,10 +113,103 @@ def test_streamed_fsa_matches_full_basis_oracle(length: int):
 
     np.testing.assert_allclose(
         streamed.reduced_fsa_hamiltonian,
-        oracle_h,
+        _apply_shell_sign_similarity(oracle_h, shell_signs),
         atol=1e-11,
         rtol=0.0,
     )
+
+
+def test_streamed_fsa_is_invariant_to_small_chunks():
+    orbit = build_orbit_basis(12)
+    z2 = density_wave_state(12, 2)
+    baseline = stream_fsa_shells(orbit, z2, chunk_size=4096)
+
+    for chunk_size in (1, 3, 17):
+        candidate = stream_fsa_shells(orbit, z2, chunk_size=chunk_size)
+        np.testing.assert_allclose(candidate.beta, baseline.beta, atol=1e-13, rtol=0.0)
+        np.testing.assert_allclose(
+            candidate.projected_shells,
+            baseline.projected_shells,
+            atol=1e-13,
+            rtol=0.0,
+        )
+        np.testing.assert_allclose(
+            candidate.reduced_fsa_hamiltonian,
+            baseline.reduced_fsa_hamiltonian,
+            atol=1e-13,
+            rtol=0.0,
+        )
+        assert candidate.max_source_chunk <= chunk_size
+        assert candidate.max_projection_chunk <= chunk_size
+        assert candidate.distance_dtype == "uint8"
+
+
+def test_streamed_fsa_has_no_scalar_per_state_propagation_loop():
+    tree = ast.parse(inspect.getsource(stream_fsa_shells))
+    forbidden_state_loops = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.For, ast.AsyncFor))
+        and any(
+            isinstance(name, ast.Name) and name.id == "support"
+            for name in ast.walk(node.iter)
+        )
+    ]
+    assert not forbidden_state_loops, "FSA propagation must not loop over support"
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "searchsorted"
+        ):
+            continue
+        ancestor = parents.get(node)
+        inside_loop = False
+        while ancestor is not None:
+            inside_loop = inside_loop or isinstance(ancestor, (ast.For, ast.AsyncFor))
+            ancestor = parents.get(ancestor)
+        if inside_loop:
+            assert isinstance(node.args[1], ast.Name)
+            assert node.args[1].id == "destination_states"
+
+
+def test_projection_canonicalizes_full_basis_in_bounded_chunks(monkeypatch):
+    orbit = build_orbit_basis(10)
+    observed_sizes = []
+    original = observables_module.canonical_dihedral
+
+    def recording_canonical(states, length):
+        observed_sizes.append(len(states))
+        return original(states, length)
+
+    monkeypatch.setattr(observables_module, "canonical_dihedral", recording_canonical)
+    stream_fsa_shells(
+        orbit,
+        density_wave_state(10, 2),
+        max_shell=0,
+        chunk_size=7,
+    )
+
+    assert max(observed_sizes) <= 7
+    assert sum(observed_sizes) == len(orbit.constrained_states)
+
+
+@pytest.mark.parametrize("max_shell", [-1, 13, 1.5, True, np.int64(-2)])
+def test_streamed_fsa_rejects_invalid_max_shell(max_shell):
+    orbit = build_orbit_basis(12)
+    with pytest.raises((TypeError, ValueError), match="max_shell"):
+        stream_fsa_shells(
+            orbit,
+            density_wave_state(12, 2),
+            max_shell=max_shell,
+            chunk_size=7,
+        )
 
 
 def test_degenerate_invariant_comparison_uses_projectors_not_vector_pr2():
@@ -104,12 +232,123 @@ def test_degenerate_invariant_comparison_uses_projectors_not_vector_pr2():
         reference_vectors=reference,
         candidate_energies=energies,
         candidate_vectors=candidate,
-        z2_sector_state=z2,
+        reference_z2_sector_state=z2,
+        candidate_z2_sector_state=z2,
     )
 
     assert diagnostics["max_total_z2_diff"] == pytest.approx(0.0, abs=1e-12)
     assert diagnostics["max_projector_diag_diff"] == pytest.approx(0.0, abs=1e-12)
+    assert diagnostics["max_subspace_sine"] == pytest.approx(0.0, abs=1e-12)
     assert diagnostics["degenerate_group_count"] == 1
     assert diagnostics["isolated_group_count"] == 1
     # Rotating inside the degenerate two-state manifold changes vector-level PR2.
     assert diagnostics["max_pr2_diff_isolated"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_degenerate_invariants_detect_same_diagonal_different_subspace():
+    energies = np.asarray([0.0])
+    reference = np.asarray([[1.0], [1.0]]) / np.sqrt(2.0)
+    candidate = np.asarray([[1.0], [-1.0]]) / np.sqrt(2.0)
+    z2 = np.asarray([1.0, 0.0])
+
+    diagnostics = compare_degenerate_invariants(
+        reference_energies=energies,
+        reference_vectors=reference,
+        candidate_energies=energies,
+        candidate_vectors=candidate,
+        reference_z2_sector_state=z2,
+        candidate_z2_sector_state=z2,
+    )
+
+    assert diagnostics["max_projector_diag_diff"] == pytest.approx(0.0, abs=1e-14)
+    assert diagnostics["max_subspace_sine"] == pytest.approx(1.0, abs=1e-14)
+
+
+def test_degenerate_invariants_reject_candidate_partition_mismatch():
+    reference_energies = np.asarray([0.0, 0.5e-10, 1.0])
+    candidate_energies = np.asarray([0.0, 1.5e-10, 1.0])
+    vectors = np.eye(3)
+    z2 = np.asarray([1.0, 0.0, 0.0])
+
+    with pytest.raises(ValueError, match="degeneracy partitions"):
+        compare_degenerate_invariants(
+            reference_energies=reference_energies,
+            reference_vectors=vectors,
+            candidate_energies=candidate_energies,
+            candidate_vectors=vectors,
+            reference_z2_sector_state=z2,
+            candidate_z2_sector_state=z2,
+            tolerance=1e-10,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("reference_energies", np.asarray([[0.0, 1.0]]), "one-dimensional"),
+        ("reference_energies", np.asarray([1.0, 0.0]), "sorted"),
+        ("candidate_energies", np.asarray([0.0, np.inf]), "finite"),
+        ("reference_vectors", np.ones(2), "two-dimensional"),
+        ("candidate_vectors", np.asarray([[1.0, 0.0], [0.0, np.nan]]), "finite"),
+        ("reference_vectors", np.asarray([[1.0, 1.0], [0.0, 0.0]]), "orthonormal"),
+        ("candidate_z2_sector_state", np.asarray([0.0, 1.0]), "Z2"),
+        ("tolerance", 0.0, "tolerance"),
+        ("tolerance", True, "tolerance"),
+    ],
+)
+def test_degenerate_invariants_reject_invalid_inputs(field, replacement, message):
+    arguments = {
+        "reference_energies": np.asarray([0.0, 1.0]),
+        "reference_vectors": np.eye(2),
+        "candidate_energies": np.asarray([0.0, 1.0]),
+        "candidate_vectors": np.eye(2),
+        "reference_z2_sector_state": np.asarray([1.0, 0.0]),
+        "candidate_z2_sector_state": np.asarray([1.0, 0.0]),
+        "tolerance": 1e-10,
+    }
+    arguments[field] = replacement
+    with pytest.raises((TypeError, ValueError), match=message):
+        compare_degenerate_invariants(**arguments)
+
+
+def test_compute_observables_consumes_eigensystem_without_dense_solve(monkeypatch):
+    basis = build_orbit_basis(10)
+    hamiltonian = assemble_reduced_hamiltonian(basis)
+    energies, eigenvectors = np.linalg.eigh(hamiltonian.toarray())
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("compute_observables must not densify or diagonalize")
+
+    monkeypatch.setattr(sp.csr_matrix, "toarray", forbidden)
+    monkeypatch.setattr(np.linalg, "eigh", forbidden)
+    result = compute_observables(
+        basis,
+        hamiltonian,
+        energies,
+        eigenvectors,
+        chunk_size=3,
+    )
+
+    np.testing.assert_array_equal(result["energies"], energies)
+    np.testing.assert_array_equal(result["eigenvectors"], eigenvectors)
+    np.testing.assert_allclose(np.sum(result["overlap_z2"]), 0.5, atol=1e-12)
+    assert "invariant_diagnostics" not in result
+    assert result["fsa_shell_vectors_sector"].shape == (6, len(basis.representatives))
+
+
+@pytest.mark.parametrize(
+    ("energies", "eigenvectors", "matrix_shape", "message"),
+    [
+        (np.arange(13.0), np.eye(14), (14, 14), "energies"),
+        (np.arange(14.0), np.eye(13, 14), (14, 14), "eigenvectors"),
+        (np.arange(14.0), np.eye(14), (13, 13), "Hamiltonian"),
+        (np.r_[np.arange(13.0), np.nan], np.eye(14), (14, 14), "finite"),
+    ],
+)
+def test_compute_observables_validates_dimensions_and_finiteness(
+    energies, eigenvectors, matrix_shape, message
+):
+    basis = build_orbit_basis(10)
+    matrix = sp.csr_matrix(matrix_shape, dtype=np.float64)
+    with pytest.raises(ValueError, match=message):
+        compute_observables(basis, matrix, energies, eigenvectors, chunk_size=4)
