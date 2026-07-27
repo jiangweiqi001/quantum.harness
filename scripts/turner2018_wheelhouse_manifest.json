@@ -4,7 +4,7 @@
   "platform": "manylinux2014_x86_64",
   "implementation": "cp",
   "abi": "cp312",
-  "lock_sha256": "2eb458c846b00744136673321f93a2afc190203d8c8e3e73d92764b5a1b1a558",
+  "lock_sha256": "18b01e07cd95215d15be9a445968af215710b5e517ea1498e75c645cd790e211",
   "packages": [
     {
       "name": "contourpy",

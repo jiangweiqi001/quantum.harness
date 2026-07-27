@@ -29,6 +29,9 @@ from turner2018_fig2 import evolve_observables, half_chain_entropy
 from turner2018_fig2_itebd import render_figures, run_state
 
 
+REPO = Path(__file__).resolve().parents[2]
+
+
 def _open_chain_center_entropy(length, times):
     basis = constrained_basis(length, pbc=False)
     hamiltonian = pxp_hamiltonian(basis, length, pbc=False)
@@ -948,3 +951,47 @@ def test_state_all_runs_states_sequentially(monkeypatch, tmp_path):
         == 0
     )
     assert calls == ["vacuum", "Z2", "Z3", "Z4"]
+
+
+def test_lasg02_itebd_wrapper_has_isolated_state_resources():
+    wrapper = (REPO / "scripts" / "turner2018_itebd_lasg02.sbatch").read_text()
+    for directive in (
+        "#SBATCH --partition=ihicnormal",
+        "#SBATCH --account=chenkun2025",
+        "#SBATCH --qos=user_student090",
+        "#SBATCH --nodes=1",
+        "#SBATCH --ntasks=1",
+        "#SBATCH --cpus-per-task=8",
+        "#SBATCH --mem=24000M",
+        "#SBATCH --time=24:00:00",
+    ):
+        assert directive in wrapper
+    assert "vacuum|Z2|Z3|Z4" in wrapper
+    assert 'source "$canonical_runner"' in wrapper
+
+
+def test_lasg02_itebd_runner_resumes_exact_chi400_configuration():
+    runner = (REPO / "scripts" / "turner2018_itebd_lasg02_run.sh").read_text()
+    manifest = json.loads(
+        (REPO / "scripts" / "turner2018_itebd_runtime_manifest.json").read_text()
+    )
+    assert 'TURNER_ITEBD_TARGET_TIME="${TURNER_ITEBD_TARGET_TIME:-30.0}"' in runner
+    assert '.venv-itebd/bin/python}"' in runner
+    assert "--state \"$TURNER_ITEBD_STATE\"" in runner
+    assert '--target-time "$TURNER_ITEBD_TARGET_TIME"' in runner
+    assert "--dt 0.05" in runner
+    assert "--chi-max 400" in runner
+    assert "--sample-dt 0.1" in runner
+    assert "--checkpoint-dt 1.0" in runner
+    assert "--resume" in runner
+    assert "turner2018_wheelhouse.py" in runner
+    assert "turner2018_itebd_runtime_manifest.json" in runner
+    assert "--check-runtime" in runner
+    assert manifest["smoke_import"]["module_distributions"] == {
+        "tenpy": "physics-tenpy"
+    }
+    assert manifest["smoke_import"]["expected_versions"]["physics-tenpy"] == "1.1.0"
+    assert (
+        manifest["source_build"]["built_wheel_sha256"]
+        == "83318765b72ab05088b89d7d0977dd86b699c5dc2db6e1ba87cb85d16ff51959"
+    )

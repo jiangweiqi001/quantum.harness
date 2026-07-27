@@ -209,7 +209,8 @@ def _validate_current_stage(
 def _git_revision() -> str:
     repository_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository_root,
         text=True,
         capture_output=True,
         check=False,

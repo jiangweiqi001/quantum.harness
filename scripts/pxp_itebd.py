@@ -308,7 +308,6 @@ def build_imps(initial_state: str, config: ITEBDConfig) -> MPS:
         sites,
         product_pattern(initial_state, config.unit_cell),
         bc="infinite",
-        unit_cell_width=config.unit_cell,
     )
 
 

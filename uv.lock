@@ -499,7 +499,7 @@ requires-dist = [
     { name = "h5py", specifier = "==3.14.0" },
     { name = "matplotlib", specifier = "==3.10.9" },
     { name = "numpy", specifier = "==2.2.6" },
-    { name = "physics-tenpy", specifier = ">=1.1.0" },
+    { name = "physics-tenpy", specifier = "==1.1.0" },
     { name = "pillow", specifier = "==12.2.0" },
     { name = "pymupdf" },
     { name = "pymupdf4llm" },

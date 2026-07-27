@@ -97,6 +97,20 @@ def test_builds_canonical_twelve_site_infinite_product_state():
     assert np.max(psi.norm_test()) < 1e-12
 
 
+def test_build_imps_supports_tenpy_without_unit_cell_width(monkeypatch):
+    sentinel = object()
+
+    def from_product_state(sites, product_state, *, bc):
+        assert len(sites) == 12
+        assert len(product_state) == 12
+        assert bc == "infinite"
+        return sentinel
+
+    monkeypatch.setattr(MPS, "from_product_state", from_product_state)
+
+    assert build_imps("Z2", ITEBDConfig(chi_max=8)) is sentinel
+
+
 def test_z2_initial_measurements():
     psi = build_imps("Z2", ITEBDConfig(chi_max=8))
     sample = measure_sample(psi, 0.0, 0.0, 0.0)
@@ -157,7 +171,6 @@ def test_evolution_rejects_blockade_violation():
         sites,
         ["down", "down"] + ["up"] * 10,
         bc="infinite",
-        unit_cell_width=12,
     )
 
     with pytest.raises(RuntimeError, match="blockade violation exceeds 1e-8"):

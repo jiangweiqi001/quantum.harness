@@ -23,7 +23,7 @@ esac
 export TURNER_LENGTH
 export TURNER_ALLOWED_LENGTHS="22|24|26|28|30"
 
-readonly TURNER_SHARED_ROOT="/public/home/student090"
+TURNER_SHARED_ROOT="/public/home/student090"
 if [[ -z "${SLURM_SUBMIT_DIR:-}" ]]; then
   echo "SLURM_SUBMIT_DIR is required" >&2
   exit 2

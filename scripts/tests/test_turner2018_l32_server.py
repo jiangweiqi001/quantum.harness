@@ -1293,6 +1293,16 @@ class TurnerL32SlurmTests(unittest.TestCase):
             'TURNER_PYTHON="${TURNER_PYTHON:-$TURNER_REPO/.venv/bin/python}"',
             text,
         )
+        validation_loop = text[
+            text.index("for variable in \\") : text.index(
+                "done", text.index("for variable in \\")
+            )
+        ]
+        self.assertNotIn("TURNER_PYTHON", validation_loop)
+        self.assertIn(
+            'canonical_python="$(realpath -m -- "$TURNER_PYTHON")"',
+            text,
+        )
         self.assertIn("realpath -m", text)
         self.assertIn("turner2018_wheelhouse.py", text)
         self.assertIn("--check-runtime", text)
@@ -1723,6 +1733,32 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(sentinel.read_text(), "30")
 
+    def test_wrapper_can_source_real_runner_without_redeclaring_readonly_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            approved_root = temporary / "approved-root"
+            submit = approved_root / "quantum.harness"
+            scripts = submit / "scripts"
+            scripts.mkdir(parents=True)
+            (scripts / "turner2018_lasg02_run.sh").write_text(
+                self.RUNNER.read_text().replace(self.LASG02_ROOT, str(approved_root))
+            )
+            spool = self._synthetic_root_wrapper(approved_root)
+
+            result = subprocess.run(
+                ["bash", str(spool)],
+                env={
+                    **self._valid_runner_environment(),
+                    "SLURM_SUBMIT_DIR": str(submit),
+                },
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertNotIn("readonly variable", result.stderr)
+            self.assertIn("missing offline CPython runtime", result.stderr)
+
     def test_wrapper_rejects_descendant_checkout_without_sourcing_runner(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
@@ -1882,6 +1918,55 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("TURNER_REPO", result.stderr)
                 self.assertNotIn("SLURM_MEM_PER_NODE", result.stderr)
+
+    def test_runner_validates_python_target_without_resolving_venv_launcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            approved_root = Path(directory) / "approved-root"
+            repo = approved_root / "quantum.harness"
+            scripts = repo / "scripts"
+            scripts.mkdir(parents=True)
+            (scripts / "turner2018_wheelhouse.py").write_text("")
+            (scripts / "turner2018_l32_server.py").write_text("")
+            runtime = approved_root / "python" / "cpython-3.12"
+            runtime.mkdir(parents=True)
+            launcher = repo / ".venv" / "bin" / "python"
+            launcher.parent.mkdir(parents=True)
+            target = approved_root / "python-shim"
+            sentinel = approved_root / "launcher-used"
+            target.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [[ "${1:-}" == "-c" ]]; then\n'
+                '  printf "%s\\n" "$FAKE_RUNTIME"\n'
+                "  exit 0\n"
+                "fi\n"
+                'if [[ "${1:-}" == *"turner2018_wheelhouse.py" ]]; then exit 0; fi\n'
+                'printf "%s" "$0" > "$RUNNER_SENTINEL"\n'
+            )
+            target.chmod(0o755)
+            launcher.symlink_to(target)
+            runner = approved_root / "runner.sh"
+            runner.write_text(
+                self.RUNNER.read_text().replace(self.LASG02_ROOT, str(approved_root))
+            )
+
+            result = subprocess.run(
+                ["bash", str(runner)],
+                env={
+                    **self._valid_runner_environment(),
+                    "SLURM_SUBMIT_DIR": str(repo),
+                    "TURNER_REPO": str(repo),
+                    "TURNER_RUNTIME": str(runtime),
+                    "TURNER_PYTHON": str(launcher),
+                    "TURNER_OUTPUT_DIR": str(approved_root / "results"),
+                    "FAKE_RUNTIME": str(runtime.resolve()),
+                    "RUNNER_SENTINEL": str(sentinel),
+                },
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(sentinel.read_text(), str(launcher))
 
     def test_runner_rejects_every_scheduler_fact_mismatch_before_compute(self):
         mismatches = (
@@ -2462,6 +2547,27 @@ class TurnerSmallLEquivalenceTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
         self.assertEqual(actual, expected)
+
+    def test_git_revision_uses_cwd_instead_of_unsupported_dash_c(self):
+        import turner2018_l32_server as server
+
+        completed = subprocess.CompletedProcess(
+            args=["git", "rev-parse", "HEAD"],
+            returncode=0,
+            stdout="a" * 40 + "\n",
+            stderr="",
+        )
+        with mock.patch.object(server.subprocess, "run", return_value=completed) as run:
+            revision = server._git_revision()
+
+        self.assertEqual(revision, "a" * 40)
+        run.assert_called_once_with(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
 
 if __name__ == "__main__":

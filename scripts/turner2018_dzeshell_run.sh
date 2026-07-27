@@ -75,10 +75,18 @@ require_approved_path() {
 }
 
 for variable in \
-  TURNER_REPO TURNER_RUNTIME TURNER_OUTPUT_DIR TURNER_PYTHON SLURM_SUBMIT_DIR
+  TURNER_REPO TURNER_RUNTIME TURNER_OUTPUT_DIR SLURM_SUBMIT_DIR
 do
   require_approved_path "$variable"
 done
+canonical_python="$(realpath -m -- "$TURNER_PYTHON")"
+case "$canonical_python" in
+  "$approved_root"/*) ;;
+  *)
+    echo "TURNER_PYTHON must resolve below $TURNER_SHARED_ROOT: $TURNER_PYTHON" >&2
+    exit 2
+    ;;
+esac
 if [[ -n "${TURNER_OFFLINE_IMAGE:-}" ]]; then
   require_approved_path TURNER_OFFLINE_IMAGE
 fi

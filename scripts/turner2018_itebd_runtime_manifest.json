@@ -1,0 +1,37 @@
+{
+  "schema_version": "turner2018-wheelhouse-v1",
+  "python": "3.12",
+  "platform": "manylinux2014_x86_64",
+  "implementation": "cp",
+  "abi": "cp312",
+  "lock_sha256": "18b01e07cd95215d15be9a445968af215710b5e517ea1498e75c645cd790e211",
+  "packages": [],
+  "source_build": {
+    "distribution": "physics-tenpy",
+    "version": "1.1.0",
+    "source_filename": "physics_tenpy-1.1.0.tar.gz",
+    "source_sha256": "dd9001d387c0b12ab34da29a5874a406b3c7a38d0513c7dcbfb8d41df0db446b",
+    "built_wheel": "physics_tenpy-1.1.0-py3-none-any.whl",
+    "built_wheel_sha256": "83318765b72ab05088b89d7d0977dd86b699c5dc2db6e1ba87cb85d16ff51959",
+    "build_dependencies": {
+      "setuptools": "83.0.0",
+      "wheel": "0.47.0"
+    },
+    "cython_extensions": false,
+    "build_command": "python -m pip wheel --no-build-isolation --no-deps"
+  },
+  "smoke_import": {
+    "modules": ["numpy", "scipy", "h5py", "matplotlib", "tenpy"],
+    "module_distributions": {
+      "tenpy": "physics-tenpy"
+    },
+    "expected_versions": {
+      "numpy": "2.2.6",
+      "scipy": "1.15.3",
+      "h5py": "3.14.0",
+      "matplotlib": "3.10.9",
+      "physics-tenpy": "1.1.0"
+    },
+    "installer": "source-built offline wheel"
+  }
+}

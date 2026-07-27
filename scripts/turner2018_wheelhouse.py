@@ -21,6 +21,7 @@ from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 
 
 MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+DISTRIBUTION_NAME = re.compile(r"[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*\Z")
 TARGET_PYTHON = (3, 12)
 MAX_GLIBC = (2, 17)
 LEGACY_MANYLINUX_FLOORS = {
@@ -67,8 +68,21 @@ def _validate_smoke_import(manifest: dict) -> dict:
             raise RuntimeError(f"invalid smoke import module: {module!r}")
     if len(set(modules)) != len(modules):
         raise RuntimeError("duplicate smoke import module")
+    module_distributions = smoke.get("module_distributions", {})
+    if not isinstance(module_distributions, dict):
+        raise RuntimeError("smoke import module_distributions must be an object")
+    for module, distribution in module_distributions.items():
+        if (
+            module not in modules
+            or not isinstance(distribution, str)
+            or DISTRIBUTION_NAME.fullmatch(distribution) is None
+        ):
+            raise RuntimeError("smoke import modules must match expected_versions")
+    distributions = {
+        module_distributions.get(module, module) for module in modules
+    }
     expected = smoke.get("expected_versions")
-    if not isinstance(expected, dict) or set(modules) != set(expected):
+    if not isinstance(expected, dict) or distributions != set(expected):
         raise RuntimeError("smoke import modules must match expected_versions")
     return smoke
 

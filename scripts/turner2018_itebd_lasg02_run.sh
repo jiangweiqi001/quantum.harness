@@ -2,13 +2,18 @@
 
 set -euo pipefail
 
-: "${TURNER_ALLOWED_LENGTHS:?TURNER_ALLOWED_LENGTHS is required}"
-: "${TURNER_LENGTH:?TURNER_LENGTH is required}"
+: "${TURNER_ITEBD_STATE:?TURNER_ITEBD_STATE is required}"
+case "$TURNER_ITEBD_STATE" in
+  vacuum|Z2|Z3|Z4) ;;
+  *)
+    echo "unsupported TURNER_ITEBD_STATE=$TURNER_ITEBD_STATE" >&2
+    exit 2
+    ;;
+esac
 
 for variable in \
   SLURM_JOB_ID SLURM_JOB_PARTITION SLURM_JOB_ACCOUNT SLURM_JOB_QOS \
-  SLURM_JOB_NUM_NODES SLURM_NTASKS SLURM_CPUS_PER_TASK \
-  SLURM_MEM_PER_NODE
+  SLURM_JOB_NUM_NODES SLURM_NTASKS SLURM_CPUS_PER_TASK SLURM_MEM_PER_NODE
 do
   if [[ -z "${!variable:-}" ]]; then
     echo "$variable is required" >&2
@@ -16,28 +21,12 @@ do
   fi
 done
 
-case "|$TURNER_ALLOWED_LENGTHS|" in
-  *"|$TURNER_LENGTH|"*) ;;
-  *)
-    echo "TURNER_LENGTH=$TURNER_LENGTH is not allowed by this resource class ($TURNER_ALLOWED_LENGTHS)" >&2
-    exit 2
-    ;;
-esac
-
-case "$TURNER_LENGTH" in
-  22|24|26|28|30) ;;
-  *)
-    echo "unsupported TURNER_LENGTH=$TURNER_LENGTH; LASG02 permits only 22,24,26,28,30" >&2
-    exit 2
-    ;;
-esac
-
 require_scheduler_value() {
   local variable="$1"
   local expected="$2"
   local actual="${!variable}"
   if [[ "$actual" != "$expected" ]]; then
-    echo "$variable=$actual does not match LASG02 Turner ED (expected $expected)" >&2
+    echo "$variable=$actual does not match LASG02 Turner iTEBD (expected $expected)" >&2
     exit 2
   fi
 }
@@ -47,50 +36,27 @@ require_scheduler_value SLURM_JOB_ACCOUNT chenkun2025
 require_scheduler_value SLURM_JOB_QOS user_student090
 require_scheduler_value SLURM_JOB_NUM_NODES 1
 require_scheduler_value SLURM_NTASKS 1
-require_scheduler_value SLURM_CPUS_PER_TASK 24
-if [[ "${SLURM_MEM_PER_NODE%M}" != 80000 ]]; then
-  echo "SLURM_MEM_PER_NODE=$SLURM_MEM_PER_NODE does not match LASG02 Turner ED (expected 80000 MiB)" >&2
-  exit 2
-fi
-
-if ! command -v scontrol >/dev/null 2>&1; then
-  echo "scontrol command is required to validate the Slurm walltime" >&2
-  exit 2
-fi
-if ! scheduler_job="$(scontrol show job -o "$SLURM_JOB_ID")"; then
-  echo "scontrol query failed for SLURM_JOB_ID=$SLURM_JOB_ID" >&2
-  exit 2
-fi
-time_limit=""
-time_limit_count=0
-IFS=$' \t\n' read -r -a scheduler_fields <<< "${scheduler_job//$'\n'/ }"
-for scheduler_field in "${scheduler_fields[@]}"; do
-  case "$scheduler_field" in
-    TimeLimit=*)
-      time_limit="${scheduler_field#TimeLimit=}"
-      time_limit_count=$((time_limit_count + 1))
-      ;;
-  esac
-done
-if [[ "$time_limit_count" != 1 ]] || \
-   [[ ! "$time_limit" =~ ^([0-9]+-)?[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
-  echo "malformed or missing TimeLimit in scontrol response for SLURM_JOB_ID=$SLURM_JOB_ID" >&2
-  exit 2
-fi
-if [[ "$time_limit" != 1-00:00:00 ]]; then
-  echo "TimeLimit=$time_limit does not match LASG02 Turner ED (expected 1-00:00:00)" >&2
+require_scheduler_value SLURM_CPUS_PER_TASK 8
+if [[ "${SLURM_MEM_PER_NODE%M}" != 24000 ]]; then
+  echo "SLURM_MEM_PER_NODE=$SLURM_MEM_PER_NODE does not match LASG02 Turner iTEBD (expected 24000 MiB)" >&2
   exit 2
 fi
 
 readonly TURNER_SHARED_ROOT="/public/home/student090"
 TURNER_REPO="${TURNER_REPO:-$TURNER_SHARED_ROOT/quantum.harness}"
 TURNER_RUNTIME="${TURNER_RUNTIME:-$TURNER_SHARED_ROOT/python/cpython-3.12}"
-TURNER_OUTPUT_DIR="${TURNER_OUTPUT_DIR:-$TURNER_SHARED_ROOT/results/turner-l${TURNER_LENGTH}}"
-TURNER_PYTHON="${TURNER_PYTHON:-$TURNER_REPO/.venv/bin/python}"
+TURNER_OUTPUT_DIR="${TURNER_OUTPUT_DIR:-$TURNER_SHARED_ROOT/results/fig2-itebd}"
+TURNER_PYTHON="${TURNER_PYTHON:-$TURNER_REPO/.venv-itebd/bin/python}"
+TURNER_OFFICIAL_DATA="${TURNER_OFFICIAL_DATA:-$TURNER_REPO/.external/official-data/turner-2018}"
+TURNER_ITEBD_TARGET_TIME="${TURNER_ITEBD_TARGET_TIME:-30.0}"
 SLURM_SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$TURNER_REPO}"
 
-approved_root="$(realpath -m -- "$TURNER_SHARED_ROOT")"
+if [[ "$TURNER_ITEBD_TARGET_TIME" != 30 && "$TURNER_ITEBD_TARGET_TIME" != 30.0 ]]; then
+  echo "TURNER_ITEBD_TARGET_TIME must be 30.0" >&2
+  exit 2
+fi
 
+approved_root="$(realpath -m -- "$TURNER_SHARED_ROOT")"
 require_approved_path() {
   local variable="$1"
   local value="${!variable}"
@@ -106,7 +72,8 @@ require_approved_path() {
 }
 
 for variable in \
-  TURNER_REPO TURNER_RUNTIME TURNER_OUTPUT_DIR SLURM_SUBMIT_DIR
+  TURNER_REPO TURNER_RUNTIME TURNER_OUTPUT_DIR TURNER_OFFICIAL_DATA \
+  SLURM_SUBMIT_DIR
 do
   require_approved_path "$variable"
 done
@@ -123,10 +90,6 @@ if [[ "$SLURM_SUBMIT_DIR" != "$TURNER_REPO" ]]; then
   exit 2
 fi
 
-[[ -d "$TURNER_REPO" ]] || {
-  echo "missing reviewed checkout: $TURNER_REPO" >&2
-  exit 2
-}
 [[ -d "$TURNER_RUNTIME" ]] || {
   echo "missing offline CPython runtime: $TURNER_RUNTIME" >&2
   exit 2
@@ -135,18 +98,27 @@ fi
   echo "missing offline virtual environment: $TURNER_PYTHON" >&2
   exit 2
 }
+[[ -d "$TURNER_OFFICIAL_DATA" ]] || {
+  echo "missing official Turner data: $TURNER_OFFICIAL_DATA" >&2
+  exit 2
+}
+checkpoint="$TURNER_OUTPUT_DIR/fig2_itebd_${TURNER_ITEBD_STATE}_checkpoint.h5"
+[[ -f "$checkpoint" ]] || {
+  echo "missing checkpoint for $TURNER_ITEBD_STATE: $checkpoint" >&2
+  exit 2
+}
 
 expected_runtime="$(cd "$TURNER_RUNTIME" && pwd -P)"
 actual_runtime="$(
   "$TURNER_PYTHON" -c \
     'import pathlib, sys; print(pathlib.Path(sys.base_prefix).resolve())'
 )"
-[[ "$actual_runtime" == "$expected_runtime" ]] || {
+if [[ "$actual_runtime" != "$expected_runtime" ]]; then
   echo "offline virtual environment uses $actual_runtime, expected $expected_runtime" >&2
   exit 2
-}
+fi
 "$TURNER_PYTHON" "$TURNER_REPO/scripts/turner2018_wheelhouse.py" \
-  --manifest "$TURNER_REPO/scripts/turner2018_wheelhouse_manifest.json" \
+  --manifest "$TURNER_REPO/scripts/turner2018_itebd_runtime_manifest.json" \
   --check-runtime
 
 export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
@@ -157,10 +129,16 @@ export NUMEXPR_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 export OMP_PROC_BIND=spread
 export OMP_PLACES=cores
 
-mkdir -p "$TURNER_OUTPUT_DIR"
 cd "$TURNER_REPO"
-exec "$TURNER_PYTHON" -u scripts/turner2018_l32_server.py \
-  --length "$TURNER_LENGTH" \
-  --stage all \
+exec "$TURNER_PYTHON" -u scripts/turner2018_fig2_itebd.py \
+  --state "$TURNER_ITEBD_STATE" \
+  --target-time "$TURNER_ITEBD_TARGET_TIME" \
+  --dt 0.05 \
+  --chi-max 400 \
+  --sample-dt 0.1 \
+  --checkpoint-dt 1.0 \
+  --resume \
+  --fit-start 0.0 \
+  --fit-stop 12.0 \
   --output-dir "$TURNER_OUTPUT_DIR" \
-  --chunk-columns 24
+  --official-data-dir "$TURNER_OFFICIAL_DATA"
