@@ -595,3 +595,91 @@ Selected indices, energies, matches, and gaps remained:
 - Official DOI archives remain unavailable locally; their integration tests
   are skipped while deterministic official fixtures pass.
 - Independent L=32 rendering still requires the independent L=32 eigensystem.
+
+---
+
+# Dzeshell Task 1: Production profile and Slurm wrappers
+
+## Status
+DONE
+
+## Scope
+- Replaced the stale tracked qdeshell scheduler facts with the verified
+  Dzeshell `dzagnormal` node shape, exact GRES type, 8 CPU/GPU ratio, and
+  shared project/results roots.
+- Added immutable wrappers for `L=22/24/26/28`, `L=30`, and `L=32`, plus one
+  common runner for the solver invocation and offline-environment checks.
+- Removed the obsolete `turner2018_l32_qdagnormal.sbatch`.
+- Preserved the generic provider-neutral SCNet path and its regression tests.
+- Kept all SSH connection details and credentials outside tracked files.
+
+## TDD evidence
+Tests were edited before production files.
+
+Initial RED:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_cluster_profile.py \
+  scripts/tests/test_turner2018_l32_server.py -q
+```
+```text
+8 failed, 70 passed, 50 subtests passed in 4.49s
+```
+The failures showed the stale shared path/partition/profile values, absent
+Dzeshell wrappers/common runner, and stale submission documentation.
+
+Stale-wrapper RED:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests::test_dzeshell_wrappers_have_immutable_length_resource_classes -q
+```
+```text
+1 failed in 0.31s
+AssertionError: True is not false
+```
+This proved the old qdagnormal wrapper still existed before its removal.
+
+Focused GREEN:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_cluster_profile.py \
+  scripts/tests/test_turner2018_l32_server.py -q
+```
+```text
+75 passed, 56 subtests passed in 4.21s
+```
+
+## Verification
+Full regression:
+```bash
+.venv/bin/python -m pytest scripts/tests -q
+```
+```text
+646 passed, 11 skipped, 56 subtests passed in 101.69s
+```
+
+Shell syntax, Python compile, and diff hygiene:
+```bash
+bash -n \
+  scripts/turner2018_dzeshell_run.sh \
+  scripts/turner2018_dzeshell_l22_28.sbatch \
+  scripts/turner2018_dzeshell_l30.sbatch \
+  scripts/turner2018_dzeshell_l32.sbatch \
+  scripts/turner2018_l32_scnet.sbatch
+.venv/bin/python -m py_compile \
+  scripts/tests/test_cluster_profile.py \
+  scripts/tests/test_turner2018_l32_server.py
+git diff --check
+```
+All exited 0. IDE lint inspection found no diagnostics. Focused secret scans
+found no tracked hostname, port, username, key path/private-key material,
+password, API key, or access token in the Dzeshell profile and wrappers.
+
+## Implementation commit
+- `296c7c2` — `Configure Dzeshell production resource classes`
+
+## Concerns
+- No real job was submitted, consistent with the explicit-approval boundary.
+- Git author configuration is absent; the commit used per-command
+  author/committer values matching repository history without changing Git
+  configuration.
