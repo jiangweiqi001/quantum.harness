@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -145,6 +146,12 @@ class TurnerL32SlurmTests(unittest.TestCase):
     "local NumPy/SciPy stack is not installed",
 )
 class TurnerSmallLEquivalenceTests(unittest.TestCase):
+    validation_lengths = [10, 12, 14, 16, 18, 20]
+
+    @staticmethod
+    def _passing_result(length):
+        return {"length": length, "passed": True, "metrics": {}}
+
     def test_small_l_gate_detects_perturbed_independent_matrix(self):
         import turner2018_l32_server as server
 
@@ -175,28 +182,19 @@ class TurnerSmallLEquivalenceTests(unittest.TestCase):
                 }
             },
         }
-        passed = {
-            "length": 10,
-            "passed": True,
-            "metrics": {
-                "complete_spectrum": {
-                    "value": 0.0,
-                    "tolerance": 1e-10,
-                    "passed": True,
-                }
-            },
-        }
-
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch(
                 "turner2018_l32_server.validate_small_l",
-                side_effect=[passed, failed],
+                side_effect=[
+                    self._passing_result(10),
+                    failed,
+                    *(self._passing_result(length) for length in (14, 16, 18, 20)),
+                ],
             ):
                 return_code = main(
                     [
                         "--validate-local",
-                        "10",
-                        "12",
+                        *(str(length) for length in self.validation_lengths),
                         "--output-dir",
                         directory,
                     ]
@@ -207,15 +205,13 @@ class TurnerSmallLEquivalenceTests(unittest.TestCase):
             self.assertEqual(return_code, 1)
             self.assertEqual(summary["status"], "failed")
             self.assertFalse(summary["passed"])
-            self.assertEqual(summary["requested_lengths"], [10, 12])
+            self.assertEqual(summary["requested_lengths"], self.validation_lengths)
             self.assertFalse(summary["results"][1]["metrics"]["complete_spectrum"]["passed"])
             self.assertIn("artifact_hashes", summary)
             self.assertIn("provenance", summary)
             self.assertFalse(summary_path.with_name(summary_path.name + ".partial").exists())
 
     def test_validate_local_cli_runs_every_requested_even_length(self):
-        lengths = [10, 12, 14, 16, 18, 20]
-
         def passing(length, official_data_dir):
             return {"length": length, "passed": True, "metrics": {}}
 
@@ -227,7 +223,7 @@ class TurnerSmallLEquivalenceTests(unittest.TestCase):
                 return_code = main(
                     [
                         "--validate-local",
-                        *(str(length) for length in lengths),
+                        *(str(length) for length in self.validation_lengths),
                         "--output-dir",
                         directory,
                     ]
@@ -236,7 +232,7 @@ class TurnerSmallLEquivalenceTests(unittest.TestCase):
             self.assertEqual(return_code, 0)
             self.assertEqual(
                 [call.args[0] for call in validate.call_args_list],
-                lengths,
+                self.validation_lengths,
             )
             summary = json.loads(
                 (
@@ -245,6 +241,249 @@ class TurnerSmallLEquivalenceTests(unittest.TestCase):
             )
             self.assertEqual(summary["status"], "passed")
             self.assertTrue(summary["passed"])
+            self.assertEqual(summary["requested_lengths"], self.validation_lengths)
+            self.assertEqual(
+                [result["length"] for result in summary["results"]],
+                self.validation_lengths,
+            )
+
+    def test_validate_local_rejects_noncanonical_length_sets_before_work(self):
+        invalid_length_lists = [
+            [10, 12, 14, 16, 18],
+            [10, 12, 14, 16, 18, 18],
+            [10, 12, 14, 16, 18, 20, 22],
+            [12, 10, 14, 16, 18, 20],
+        ]
+        for lengths in invalid_length_lists:
+            with self.subTest(lengths=lengths):
+                with mock.patch(
+                    "turner2018_l32_server.run_local_validation",
+                    side_effect=AssertionError("scientific work must not start"),
+                ) as run:
+                    with self.assertRaisesRegex(SystemExit, "exactly.*10.*20"):
+                        main(["--validate-local", *(str(value) for value in lengths)])
+                run.assert_not_called()
+
+    def test_validate_local_rejects_conflicting_execution_modes_before_work(self):
+        conflicts = [
+            ["--stage", "plan"],
+            ["--dry-run"],
+            ["--length", "20"],
+            ["--chunk-columns", "8"],
+            ["--validate-small-l", "10"],
+        ]
+        for conflict in conflicts:
+            with self.subTest(conflict=conflict):
+                with mock.patch(
+                    "turner2018_l32_server.run_local_validation",
+                    side_effect=AssertionError("scientific work must not start"),
+                ) as run:
+                    with self.assertRaisesRegex(SystemExit, "mutually exclusive"):
+                        main(
+                            [
+                                "--validate-local",
+                                *(str(value) for value in self.validation_lengths),
+                                *conflict,
+                            ]
+                        )
+                run.assert_not_called()
+
+    def test_running_marker_replaces_stale_pass_before_scientific_work(self):
+        import turner2018_l32_server as server
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            path = output / "validation" / "local-equivalence.json"
+            atomic_write_json(path, {"status": "passed", "passed": True})
+            observed = []
+
+            def validate(length, official_data_dir):
+                observed.append(json.loads(path.read_text()))
+                return self._passing_result(length)
+
+            with mock.patch.object(server, "validate_small_l", side_effect=validate):
+                server.run_local_validation(
+                    self.validation_lengths,
+                    output,
+                    None,
+                    ["--validate-local"],
+                )
+
+            self.assertTrue(observed)
+            self.assertEqual(observed[0]["status"], "running")
+            self.assertFalse(observed[0]["passed"])
+
+    def test_source_hash_failure_publishes_minimal_failed_summary(self):
+        import turner2018_l32_server as server
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with (
+                mock.patch.object(
+                    server,
+                    "validate_small_l",
+                    side_effect=lambda length, _: self._passing_result(length),
+                ),
+                mock.patch.object(
+                    server,
+                    "_source_hashes",
+                    side_effect=OSError("hash injection"),
+                ),
+            ):
+                _path, summary = server.run_local_validation(
+                    self.validation_lengths, output, None, ["--validate-local"]
+                )
+
+            persisted = json.loads(
+                (output / "validation" / "local-equivalence.json").read_text()
+            )
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(persisted["status"], "failed")
+            self.assertFalse(persisted["passed"])
+            self.assertIn("hash injection", persisted["error"])
+
+    def test_provenance_failure_publishes_minimal_failed_summary(self):
+        import turner2018_l32_server as server
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with (
+                mock.patch.object(
+                    server,
+                    "validate_small_l",
+                    side_effect=lambda length, _: self._passing_result(length),
+                ),
+                mock.patch.object(
+                    server,
+                    "_git_revision",
+                    side_effect=OSError("provenance injection"),
+                ),
+            ):
+                _path, summary = server.run_local_validation(
+                    self.validation_lengths, output, None, ["--validate-local"]
+                )
+
+            self.assertEqual(summary["status"], "failed")
+            self.assertIn("provenance injection", summary["error"])
+
+    def test_final_publication_failure_leaves_running_marker(self):
+        import turner2018_l32_server as server
+
+        original = server.atomic_write_json
+        calls = 0
+
+        def fail_final(path, payload):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("final publication injection")
+            original(path, payload)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with (
+                mock.patch.object(
+                    server,
+                    "validate_small_l",
+                    side_effect=lambda length, _: self._passing_result(length),
+                ),
+                mock.patch.object(server, "atomic_write_json", side_effect=fail_final),
+            ):
+                with self.assertRaisesRegex(OSError, "final publication injection"):
+                    server.run_local_validation(
+                        self.validation_lengths, output, None, ["--validate-local"]
+                    )
+
+            persisted = json.loads(
+                (output / "validation" / "local-equivalence.json").read_text()
+            )
+            self.assertEqual(calls, 2)
+            self.assertEqual(persisted["status"], "running")
+            self.assertFalse(persisted["passed"])
+
+    def test_initial_marker_failure_is_not_reported_as_recovered(self):
+        import turner2018_l32_server as server
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with (
+                mock.patch.object(
+                    server,
+                    "atomic_write_json",
+                    side_effect=OSError("marker publication injection"),
+                ),
+                mock.patch.object(server, "_source_hashes") as hashes,
+            ):
+                with self.assertRaisesRegex(OSError, "marker publication injection"):
+                    server.run_local_validation(
+                        self.validation_lengths, output, None, ["--validate-local"]
+                    )
+            hashes.assert_not_called()
+
+    def test_fsa_shape_metrics_record_exact_candidate_and_reference_shapes(self):
+        from turner2018_l32_server import validate_small_l
+
+        result = validate_small_l(10, official_data_dir=None)
+        metrics = result["metrics"]
+        self.assertEqual(
+            metrics["fsa_beta_shape"],
+            {
+                "expected": [10],
+                "candidate": [10],
+                "reference": [10],
+                "passed": True,
+            },
+        )
+        self.assertEqual(
+            metrics["fsa_projected_shell_shape"]["expected"],
+            [6, 14],
+        )
+        self.assertTrue(metrics["fsa_projected_shell_shape"]["passed"])
+        self.assertEqual(
+            metrics["fsa_reduced_hamiltonian_shape"]["expected"],
+            [6, 6],
+        )
+        self.assertTrue(metrics["fsa_reduced_hamiltonian_shape"]["passed"])
+
+    def test_fsa_shape_mismatch_fails_without_broadcasting(self):
+        import turner2018_ed_observables as observables
+        from turner2018_l32_server import validate_small_l
+
+        original = observables.compute_observables
+
+        def wrong_beta_shape(*args, **kwargs):
+            result = original(*args, **kwargs)
+            result["fsa_beta_full_chain"] = result["fsa_beta_full_chain"][:-1]
+            return result
+
+        with mock.patch.object(
+            observables,
+            "compute_observables",
+            side_effect=wrong_beta_shape,
+        ):
+            result = validate_small_l(10, official_data_dir=None)
+
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["metrics"]["fsa_beta_shape"]["passed"])
+        self.assertFalse(result["metrics"]["fsa_beta"]["passed"])
+
+    def test_git_revision_is_resolved_from_script_repository_outside_cwd(self):
+        import turner2018_l32_server as server
+
+        expected = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                actual = server._git_revision()
+            finally:
+                os.chdir(previous)
+        self.assertEqual(actual, expected)
 
 
 if __name__ == "__main__":

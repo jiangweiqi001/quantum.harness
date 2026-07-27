@@ -36,6 +36,7 @@ LOCAL_VALIDATION_DIMENSIONS = {
     18: (5778, 209),
     20: (15127, 455),
 }
+LOCAL_VALIDATION_LENGTHS = tuple(LOCAL_VALIDATION_DIMENSIONS)
 LOCAL_VALIDATION_TOLERANCES = {
     "reduced_matrix": 1e-11,
     "complete_spectrum": 1e-10,
@@ -94,8 +95,9 @@ def _sha256(path: Path) -> str:
 
 
 def _git_revision() -> str | None:
+    repository_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+        ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
         text=True,
         capture_output=True,
         check=False,
@@ -147,6 +149,19 @@ def _dimension_metric(
     }
 
 
+def _shape_metric(
+    expected: tuple[int, ...],
+    candidate: tuple[int, ...],
+    reference: tuple[int, ...],
+) -> dict[str, list[int] | bool]:
+    return {
+        "expected": list(expected),
+        "candidate": list(candidate),
+        "reference": list(reference),
+        "passed": bool(candidate == reference == expected),
+    }
+
+
 def _source_hashes() -> dict[str, str]:
     root = Path(__file__).resolve().parent
     names = (
@@ -159,6 +174,24 @@ def _source_hashes() -> dict[str, str]:
         "turner2018_l32_server.py",
     )
     return {name: _sha256(root / name) for name in names}
+
+
+def _local_validation_provenance(invocation: list[str]) -> dict[str, Any]:
+    return {
+        "invocation": invocation,
+        "git_revision": _git_revision(),
+        "python": sys.version,
+        "platform": platform.platform(),
+        "packages": _package_versions(),
+        "candidate_engine": (
+            "turner2018_ed_engine direct dihedral-orbit assembly with "
+            "turner2018_ed_solver and external-eigensystem observables"
+        ),
+        "reference_engine": (
+            "pxp_ed full constrained basis transformed by "
+            "symmetry_basis_k0_inversion_even with turner2018_fig3 FSA"
+        ),
+    }
 
 
 def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]:
@@ -502,14 +535,51 @@ def validate_small_l(
     ).T[: length // 2 + 1]
     reference_shells = np.asarray(reference_shells.real, dtype=np.float64)
     reference_shells /= np.linalg.norm(reference_shells, axis=1, keepdims=True)
+    reference_beta = np.asarray(reference_beta)
     candidate_shells = np.asarray(
         candidate["fsa_shell_vectors_sector"],
         dtype=np.float64,
     )
-    aligned_candidate_shells = candidate_shells.copy()
-    for shell in range(reference_shells.shape[0]):
-        if np.vdot(reference_shells[shell], aligned_candidate_shells[shell]).real < 0:
-            aligned_candidate_shells[shell] *= -1.0
+    candidate_beta = np.asarray(candidate["fsa_beta_full_chain"])
+    candidate_fsa_hamiltonian = np.asarray(candidate["fsa_hamiltonian_sector"])
+    reference_fsa_hamiltonian = np.asarray(
+        reference_shells @ reference_matrix @ reference_shells.T
+    )
+    expected_shell_count = length // 2 + 1
+    fsa_shape_metrics = {
+        "fsa_beta_shape": _shape_metric(
+            (length,),
+            candidate_beta.shape,
+            reference_beta.shape,
+        ),
+        "fsa_projected_shell_shape": _shape_metric(
+            (expected_shell_count, expected_sector),
+            candidate_shells.shape,
+            reference_shells.shape,
+        ),
+        "fsa_reduced_hamiltonian_shape": _shape_metric(
+            (expected_shell_count, expected_shell_count),
+            candidate_fsa_hamiltonian.shape,
+            reference_fsa_hamiltonian.shape,
+        ),
+    }
+    fsa_shapes_pass = all(metric["passed"] for metric in fsa_shape_metrics.values())
+    failed_value = sys.float_info.max
+    if fsa_shapes_pass:
+        aligned_candidate_shells = candidate_shells.copy()
+        for shell in range(reference_shells.shape[0]):
+            if (
+                np.vdot(reference_shells[shell], aligned_candidate_shells[shell]).real
+                < 0
+            ):
+                aligned_candidate_shells[shell] *= -1.0
+        fsa_beta_error = _max_abs_array(candidate_beta - reference_beta)
+        fsa_shell_error = _max_abs_array(
+            aligned_candidate_shells - reference_shells
+        )
+    else:
+        fsa_beta_error = failed_value
+        fsa_shell_error = failed_value
 
     matrix_error = _max_abs_sparse(candidate_matrix - reference_matrix)
     spectrum_error = _max_abs_array(candidate_energies - reference_energies)
@@ -526,7 +596,6 @@ def validate_small_l(
         )
     except ValueError as error:
         invariant_error = str(error)
-        failed_value = sys.float_info.max
         invariants = {
             "max_total_z2_diff": failed_value,
             "max_projector_diag_diff": failed_value,
@@ -568,19 +637,18 @@ def validate_small_l(
             LOCAL_VALIDATION_TOLERANCES["degenerate_subspace"],
         ),
         "fsa_beta": _threshold_metric(
-            _max_abs_array(
-                np.asarray(candidate["fsa_beta_full_chain"]) - reference_beta
-            ),
+            fsa_beta_error,
             LOCAL_VALIDATION_TOLERANCES["fsa_beta"],
         ),
         "fsa_projected_shell": _threshold_metric(
-            _max_abs_array(aligned_candidate_shells - reference_shells),
+            fsa_shell_error,
             LOCAL_VALIDATION_TOLERANCES["fsa_projected_shell"],
         ),
         "pr2_isolated": _threshold_metric(
             float(invariants["max_pr2_diff_isolated"]),
             LOCAL_VALIDATION_TOLERANCES["pr2_isolated"],
         ),
+        **fsa_shape_metrics,
     }
     result: dict[str, Any] = {
         "length": length,
@@ -613,47 +681,70 @@ def run_local_validation(
     invocation: list[str],
 ) -> tuple[Path, dict[str, Any]]:
     """Run every requested local comparison and atomically publish one gate."""
-    results: list[dict[str, Any]] = []
-    for length in lengths:
-        try:
-            result = validate_small_l(length, official_data_dir)
-        except Exception as error:  # fail closed while preserving the complete gate
-            result = {
-                "length": length,
-                "passed": False,
-                "metrics": {
-                    "execution": {
-                        "passed": False,
-                        "error": f"{type(error).__name__}: {error}",
-                    }
-                },
-            }
-        results.append(result)
-    passed = bool(results) and all(result["passed"] for result in results)
-    summary = {
-        "schema_version": LOCAL_EQUIVALENCE_SCHEMA_VERSION,
-        "status": "passed" if passed else "failed",
-        "passed": passed,
-        "requested_lengths": lengths,
-        "results": results,
-        "artifact_hashes": _source_hashes(),
-        "provenance": {
-            "invocation": invocation,
-            "git_revision": _git_revision(),
-            "python": sys.version,
-            "platform": platform.platform(),
-            "packages": _package_versions(),
-            "candidate_engine": (
-                "turner2018_ed_engine direct dihedral-orbit assembly with "
-                "turner2018_ed_solver and external-eigensystem observables"
-            ),
-            "reference_engine": (
-                "pxp_ed full constrained basis transformed by "
-                "symmetry_basis_k0_inversion_even with turner2018_fig3 FSA"
-            ),
-        },
-    }
+    if tuple(lengths) != LOCAL_VALIDATION_LENGTHS:
+        raise ValueError(
+            "--validate-local requires exactly 10 12 14 16 18 20 in that order"
+        )
+    canonical_lengths = list(LOCAL_VALIDATION_LENGTHS)
     path = output_dir / "validation" / "local-equivalence.json"
+    running = {
+        "schema_version": LOCAL_EQUIVALENCE_SCHEMA_VERSION,
+        "status": "running",
+        "passed": False,
+        "requested_lengths": canonical_lengths,
+    }
+    # Initial publication failure is unrecoverable: without this marker, an old
+    # passing summary may still be authoritative.
+    atomic_write_json(path, running)
+
+    phase = "source_hashing"
+    try:
+        source_hashes = _source_hashes()
+        phase = "provenance"
+        provenance = _local_validation_provenance(invocation)
+        phase = "per_length_validation"
+        results: list[dict[str, Any]] = []
+        for length in canonical_lengths:
+            try:
+                result = validate_small_l(length, official_data_dir)
+            except Exception as error:
+                result = {
+                    "length": length,
+                    "passed": False,
+                    "metrics": {
+                        "execution": {
+                            "passed": False,
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    },
+                }
+            results.append(result)
+        phase = "aggregate_construction"
+        passed = all(result["passed"] for result in results)
+        summary = {
+            "schema_version": LOCAL_EQUIVALENCE_SCHEMA_VERSION,
+            "status": "passed" if passed else "failed",
+            "passed": passed,
+            "requested_lengths": canonical_lengths,
+            "results": results,
+            "artifact_hashes": source_hashes,
+            "provenance": provenance,
+        }
+        phase = "serialization"
+        json.dumps(summary, sort_keys=True, allow_nan=False)
+    except Exception as error:
+        failed = {
+            "schema_version": LOCAL_EQUIVALENCE_SCHEMA_VERSION,
+            "status": "failed",
+            "passed": False,
+            "requested_lengths": canonical_lengths,
+            "failure_phase": phase,
+            "error": f"{type(error).__name__}: {error}",
+        }
+        atomic_write_json(path, failed)
+        return path, failed
+
+    # Keep the running marker authoritative if final atomic publication fails.
     atomic_write_json(path, summary)
     return path, summary
 
@@ -679,17 +770,23 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     invoked = list(argv) if argv is not None else sys.argv[1:]
     if args.validate_local is not None:
-        invalid = [
-            length
-            for length in args.validate_local
-            if length not in LOCAL_VALIDATION_DIMENSIONS
-        ]
-        if invalid:
+        if tuple(args.validate_local) != LOCAL_VALIDATION_LENGTHS:
             raise SystemExit(
-                "--validate-local supports every even length from 10 through 20"
+                "--validate-local requires exactly 10 12 14 16 18 20 in that order"
+            )
+        conflicting_options = {
+            "--stage",
+            "--dry-run",
+            "--length",
+            "--chunk-columns",
+            "--validate-small-l",
+        }
+        if any(option in invoked for option in conflicting_options):
+            raise SystemExit(
+                "--validate-local is mutually exclusive with execution-mode options"
             )
         path, summary = run_local_validation(
-            args.validate_local,
+            list(LOCAL_VALIDATION_LENGTHS),
             args.output_dir,
             args.official_data_dir,
             invoked,

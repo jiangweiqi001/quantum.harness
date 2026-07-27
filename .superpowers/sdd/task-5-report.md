@@ -1,6 +1,6 @@
 # Task 5 Report: Real local validation gate for L=10–20
 
-## Status
+## Initial Task 5 Status (superseded below)
 - PASS.
 - Branch: `independent-pxp-ed`.
 - Implementation commit: `dec81d6` (`Implement independent local ED validation gate`).
@@ -54,7 +54,7 @@ PYTHONPATH=scripts /home/footman/code/quantum.harness/.venv/bin/python -m pytest
 
 The perturbation regression monkeypatches the independent assembler, changes one symmetric matrix pair by `1e-6`, and verifies that `validate_small_l(10)` returns `passed=false` with the reduced-matrix metric failing its `1e-11` threshold.
 
-## All-Length Local Gate
+## Initial All-Length Local Gate
 Final command, run after the implementation commit so the artifact provenance names `dec81d6`:
 ```bash
 /usr/bin/time -v env PYTHONPATH=scripts \
@@ -94,7 +94,7 @@ Metric order below is matrix, spectrum, total Z2, projector diagonal, subspace s
 - Projected FSA shell: `3.885780586188048e-16` (`<=1e-11`).
 - PR2 on isolated eigenspaces: `1.2625317458159202e-14` (`<=1e-10`).
 
-## Required ED Regression Suite
+## Initial Required ED Regression Suite
 Command:
 ```bash
 PYTHONPATH=scripts /home/footman/code/quantum.harness/.venv/bin/python -m pytest \
@@ -132,7 +132,121 @@ The six skips are pre-existing optional official-data tests.
 - The command returns nonzero if any result fails and writes one summary after all requested lengths.
 - No Task 6 orchestration, environment packaging, or cluster behavior was added.
 
-## Concerns
+## Initial Concerns
 - The reference oracle intentionally densifies only the reduced matrices. This is appropriate for the bounded local L=10–20 gate but is not intended for L=32.
 - BLAS used approximately 17 CPU cores in the resource run (`1706%` CPU), so elapsed time will vary with thread configuration; peak RSS remained about 136.7 MiB.
 - The generated validation artifact lives under the ignored results tree and is therefore not part of the implementation commit; its source hashes and committed Git revision make the inspected local artifact reproducible.
+
+## Important-Finding Fixes (2026-07-27)
+
+### Scope
+- `--validate-local` now accepts only the exact canonical sequence `10 12 14 16 18 20`.
+- Subsets, duplicates, extras, and reordered values are rejected before `run_local_validation`.
+- Validation mode rejects `--stage`, `--dry-run`, `--length`, `--chunk-columns`, and `--validate-small-l`; output and validation-specific official-data paths remain available.
+- A `status=running, passed=false` summary atomically replaces any prior result before hashing, provenance, or scientific work.
+- Hashing, provenance, all per-length work, aggregate construction, and serialization are guarded. Pre-publication failures atomically replace the running marker with a minimal JSON-safe failed summary.
+- Final publication failure propagates and leaves the already-published running marker authoritative.
+- Initial marker publication failure propagates immediately and is not reported as recovered.
+- FSA beta, projected shells, and reduced FSA Hamiltonian now record exact candidate/reference/expected shape metrics. Numerical beta and shell subtraction occurs only after every FSA shape gate passes, preventing NumPy broadcasting from masking corruption.
+- Git revision uses `git -C <script repository root> rev-parse HEAD`, independent of caller cwd.
+
+### Strict TDD RED
+Tests were written before review-fix production changes.
+
+Command:
+```bash
+PYTHONPATH=scripts /home/footman/code/quantum.harness/.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_l32_server.py -q
+```
+
+Observed:
+```text
+17 failed, 12 passed in 3.75s
+```
+
+The failures covered:
+- final-publication marker preservation;
+- source-hash and provenance fallback summaries;
+- stale prior-pass replacement and initial-marker failure;
+- canonical exact-length and execution-mode rejection;
+- all three FSA shape metrics and broadcast rejection;
+- cwd-independent Git revision.
+
+### GREEN
+Same focused command after implementation:
+```text
+....................                                            [100%]
+20 passed, 9 subtests passed in 0.90s
+```
+
+The nine subtests are four malformed length sequences and five conflicting execution-mode combinations.
+
+### Fixed all-length gate and resources
+Command:
+```bash
+/usr/bin/time -v env PYTHONPATH=scripts \
+  /home/footman/code/quantum.harness/.venv/bin/python \
+  scripts/turner2018_l32_server.py \
+  --validate-local 10 12 14 16 18 20 \
+  --output-dir tracks/ed/results/turner-2018/independent-ed-validation
+```
+
+Observed:
+```text
+Elapsed (wall clock) time: 0:02.95
+Maximum resident set size (kbytes): 139708
+Percent of CPU this job got: 1714%
+Exit status: 0
+```
+
+The complete JSON was read directly. It had canonical requested/result order, `status=passed`, `passed=true`, seven source hashes, and every numerical, dimensional, and FSA shape metric passed.
+
+Measured FSA shapes:
+- L=10: beta `[10]`, projected shells `[6,14]`, reduced FSA Hamiltonian `[6,6]`.
+- L=12: beta `[12]`, projected shells `[7,26]`, reduced FSA Hamiltonian `[7,7]`.
+- L=14: beta `[14]`, projected shells `[8,49]`, reduced FSA Hamiltonian `[8,8]`.
+- L=16: beta `[16]`, projected shells `[9,99]`, reduced FSA Hamiltonian `[9,9]`.
+- L=18: beta `[18]`, projected shells `[10,209]`, reduced FSA Hamiltonian `[10,10]`.
+- L=20: beta `[20]`, projected shells `[11,455]`, reduced FSA Hamiltonian `[11,11]`.
+
+Numerical maxima were unchanged:
+- reduced matrix `1.7763568394002505e-15`;
+- complete spectrum `1.4210854715202004e-14`;
+- total Z2 `8.465450562766819e-16`;
+- projector diagonal `4.3978709562964013e-14`;
+- subspace sine `6.089074432530575e-13`;
+- FSA beta `2.220446049250313e-14`;
+- projected FSA shell `3.885780586188048e-16`;
+- isolated-level PR2 `1.2625317458159202e-14`.
+
+### Full ED regression
+```bash
+PYTHONPATH=scripts /home/footman/code/quantum.harness/.venv/bin/python -m pytest \
+  scripts/tests/test_pxp_ed.py \
+  scripts/tests/test_turner2018_ed_engine.py \
+  scripts/tests/test_turner2018_ed_solver.py \
+  scripts/tests/test_turner2018_ed_artifacts.py \
+  scripts/tests/test_turner2018_ed_observables.py \
+  scripts/tests/test_turner2018_fig3.py \
+  scripts/tests/test_turner2018_fig4.py \
+  scripts/tests/test_turner2018_l32_server.py -q
+```
+
+```text
+173 passed, 6 skipped, 9 subtests passed in 9.18s
+```
+
+The skips remain the optional official-data tests.
+
+### Failure-injection evidence
+- A stale passing summary is observed as `running/false` from the first mocked scientific call.
+- Source-hash and Git-provenance exceptions publish minimal `failed/false` summaries containing a JSON-safe error string and failure phase.
+- Injecting failure into the second atomic write (final publication) raises and leaves the first `running/false` marker on disk.
+- Injecting failure into the first atomic write raises before source hashing; no recovery is claimed.
+- Truncating candidate beta to `(L-1,)` yields a failed shape metric and failed numerical metric without subtraction or broadcasting.
+- Calling `_git_revision` from an unrelated temporary cwd returns the same repository HEAD as `git -C <repo> rev-parse HEAD`.
+
+### Current concerns
+- The local oracle still intentionally densifies only reduced matrices and remains bounded to L=10–20.
+- Resource timing depends on multithreaded BLAS availability; this run used about 17 CPU cores and 136.4 MiB peak RSS.
+- The results artifact is ignored by Git. It must be regenerated after the review-fix commit so its provenance records the actual committed HEAD; the final handoff verifies that condition.
