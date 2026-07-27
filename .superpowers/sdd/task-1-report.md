@@ -346,3 +346,124 @@ Both exited 0. IDE lint inspection reported no errors in touched files.
   eigensystem, as stated in the approved design.
 - Git author configuration is absent; commits use per-command author/committer
   environment matching repository history, without changing git config.
+
+---
+
+## Reviewer-finding remediation
+
+### TDD RED evidence
+Tests for all reviewer findings were added before production changes.
+
+Command:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_fig3.py \
+  scripts/tests/test_turner2018_l32_server.py \
+  scripts/tests/test_turner2018_official.py -q
+```
+
+Expected RED result:
+```text
+6 failed, 109 passed, 4 skipped, 39 subtests passed in 21.31s
+```
+
+The failures demonstrated:
+- no selected-FSA eigenvalue gap/tolerance evidence;
+- arbitrary acceptance of rotated bases in a degenerate selected FSA block;
+- mutable selector dictionaries/arrays;
+- absent NPZ source arrays for semantic recomputation;
+- overlapping panel `(c)` label;
+- figures-stage inability to authenticate all selected semantics.
+
+### Implemented remediation
+- `Fig3ShellPanelState` is now a frozen, slotted dataclass implementing the
+  read-only mapping interface for compatibility. Its three plot arrays are
+  defensive copies with `writeable=False`; `to_metadata_dict()` is the explicit
+  JSON serialization boundary.
+- Selected FSA states must have nearest eigenvalue gap strictly greater than
+  `FSA_EIGENVALUE_GAP_TOLERANCE = 1e-10`. Both tolerance and measured nearest
+  gap are persisted per panel. Tests inject two different rotations in the
+  same exactly degenerate block and verify both fail before an individual
+  curve can be selected.
+- The independent NPZ now persists the exact selection source arrays:
+  `exact_shell_amplitudes`, `fsa_hamiltonian_sector`, and matched exact indices.
+- Figures-stage validation checks those arrays against JSON hashes and matched
+  source records, recomputes the selector, and requires exact equality for
+  exact/FSA indices, energies, match strength, roles, gap evidence, shell
+  weights/counts, and normalization.
+- A restart test independently corrupts each authenticated field/array,
+  refreshes the superficial asset/manifest hashes, and proves the figures
+  stage still refuses to skip or accept it.
+- Independent renderer expectations now derive selections directly from the
+  fixture tower/energies rather than calling the production selector.
+- Legacy coverage independently checks roles, energies, exact/FSA weights,
+  17 folded points, and black/red marker/line styling.
+- Panel `(c)` moved to the upper-right corner, away from its first high-weight
+  point, without changing any numerical data.
+
+### GREEN evidence
+Focused command:
+```bash
+.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_fig3.py \
+  scripts/tests/test_turner2018_l32_server.py \
+  scripts/tests/test_turner2018_official.py -q
+```
+
+Result:
+```text
+114 passed, 4 skipped, 50 subtests passed in 23.63s
+```
+
+Full regression:
+```bash
+.venv/bin/python -m pytest scripts/tests -q
+```
+
+Result:
+```text
+642 passed, 11 skipped, 50 subtests passed in 92.08s
+```
+
+`py_compile`, `git diff --check`, and IDE lints all passed with no output or
+diagnostics.
+
+### Real L=20 rerender and inspection
+The current-fingerprint L=20 computational and figures stages were rebuilt;
+both commands exited 0.
+
+Image:
+`tracks/ed/results/turner-2018/task7-independent/L20/figures/fig3_independent_L20.png`
+
+Visual inspection confirmed:
+- 11 folded black/red points in each panel;
+- unchanged roles, energies, and numerical curves;
+- panel `(c)` label at upper right with no overlap on the first FSA point.
+
+Exact sidecar evidence:
+- Panel (b): exact index `0`, energy `-12.07121376222543`; FSA index
+  `0`, energy `-12.017010493123097`; match `0.9818818789488396`;
+  nearest FSA gap `1.993766660882546`.
+- Panel (c): exact index `101`, energy `-2.672092951313271`; FSA index
+  `4`, energy `-2.633527459988426`; match `0.7878643145131315`;
+  nearest FSA gap `2.5886606403076566`.
+- FSA gap tolerance: `1e-10` for both.
+- Full/plotted shell counts: `21` / `11`.
+- Panel (b) exact/FSA sums:
+  `0.9819602717783971` / `1.0000000000000004`.
+- Panel (c) exact/FSA sums:
+  `0.788540937730373` / `1.0`.
+- Persisted selection source shapes:
+  exact amplitudes `[11, 455]`, FSA Hamiltonian `[11, 11]`, match indices `[11]`.
+
+### Commit
+- Reviewer-fix implementation:
+  `f11f1337e3a8565b8cec62c1ff962e1389a4d850`
+- Subject: `Harden Fig. 3 selection evidence`
+- This appended evidence is committed separately to record the exact
+  implementation hash.
+
+### Remaining concerns
+- Official DOI archives remain unavailable in this worktree; official tests
+  requiring them are skipped, while deterministic official-path fixtures pass.
+- Independent L=32 rendering still requires the independent L=32 eigensystem.
