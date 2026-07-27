@@ -250,3 +250,98 @@ The skips remain the optional official-data tests.
 - The local oracle still intentionally densifies only reduced matrices and remains bounded to L=10–20.
 - Resource timing depends on multithreaded BLAS availability; this run used about 17 CPU cores and 136.4 MiB peak RSS.
 - The results artifact is ignored by Git. It must be regenerated after the review-fix commit so its provenance records the actual committed HEAD; the final handoff verifies that condition.
+
+## Final Important-Gap Fixes (2026-07-27)
+
+### Commit
+- SHA: `5b63a43`
+- Subject: `Harden local validation invocation provenance`
+
+### Scope
+- `ArgumentParser` now sets `allow_abbrev=False`.
+- `--stage` and `--validate-local` are members of one structural mutually exclusive group.
+- Remaining stage-only raw options are normalized at the first `=` before conflict checking. Validation rejects separated and equals forms, including explicit defaults.
+- `--official-data-dir` is stage-only and rejected in local validation mode.
+- `_git_revision` requires both `returncode == 0` and nonempty stdout. A real subprocess failure or blank revision raises a controlled `RuntimeError`, and the already-published running marker is replaced by a minimal failed provenance summary.
+
+### RED
+Command:
+```bash
+PYTHONPATH=scripts /home/footman/code/quantum.harness/.venv/bin/python -m pytest \
+  scripts/tests/test_turner2018_l32_server.py -q
+```
+
+Observed before production changes:
+```text
+8 failed, 21 passed, 9 subtests passed in 1.11s
+```
+
+The eight failures covered:
+- accepted `--validate-loc` abbreviation reaching scientific work;
+- equals forms for `--stage`, `--length`, `--chunk-columns`, `--validate-small-l`, and `--official-data-dir`;
+- a real `CompletedProcess(returncode=128, stdout="")`;
+- a nominally successful `CompletedProcess(returncode=0, stdout="")`.
+
+### GREEN
+Focused command after implementation and commit:
+```text
+......................                                   [100%]
+22 passed, 16 subtests passed in 0.89s
+```
+
+The 16 subtests include prior canonical/conflict cases, five equals-form conflicts, and both non-passing Git result forms.
+
+### HEAD-consistent all-length evidence
+Command:
+```bash
+/usr/bin/time -v env PYTHONPATH=scripts \
+  /home/footman/code/quantum.harness/.venv/bin/python \
+  scripts/turner2018_l32_server.py \
+  --validate-local 10 12 14 16 18 20 \
+  --output-dir tracks/ed/results/turner-2018/independent-ed-validation
+```
+
+Observed:
+```text
+Elapsed (wall clock) time: 0:02.87
+Maximum resident set size (kbytes): 140060
+Percent of CPU this job got: 1709%
+Exit status: 0
+```
+
+Direct JSON inspection:
+```text
+revision 5b63a43 status passed hashes 7
+```
+
+The canonical six lengths, all dimensional and FSA shape gates, all numerical gates, and every per-metric `passed` field were true. Numerical maxima remained:
+- reduced matrix `1.7763568394002505e-15`;
+- complete spectrum `1.4210854715202004e-14`;
+- total Z2 `8.465450562766819e-16`;
+- projector diagonal `4.3978709562964013e-14`;
+- subspace sine `6.089074432530575e-13`;
+- FSA beta `2.220446049250313e-14`;
+- projected FSA shell `3.885780586188048e-16`;
+- isolated-level PR2 `1.2625317458159202e-14`.
+
+### Final full ED regression
+```bash
+PYTHONPATH=scripts /home/footman/code/quantum.harness/.venv/bin/python -m pytest \
+  scripts/tests/test_pxp_ed.py \
+  scripts/tests/test_turner2018_ed_engine.py \
+  scripts/tests/test_turner2018_ed_solver.py \
+  scripts/tests/test_turner2018_ed_artifacts.py \
+  scripts/tests/test_turner2018_ed_observables.py \
+  scripts/tests/test_turner2018_fig3.py \
+  scripts/tests/test_turner2018_fig4.py \
+  scripts/tests/test_turner2018_l32_server.py -q
+```
+
+```text
+175 passed, 6 skipped, 16 subtests passed in 8.85s
+```
+
+### Final concerns
+- The oracle remains intentionally limited to local L=10–20 reduced matrices.
+- BLAS thread availability affects elapsed time; the final implementation run used about 17 CPU cores and 136.8 MiB peak RSS.
+- The report is committed separately from the implementation so it can record the actual implementation SHA. The ignored validation artifact is regenerated once more after the report commit, and the final handoff checks that its Git provenance equals final HEAD.
