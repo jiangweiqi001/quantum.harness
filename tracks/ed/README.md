@@ -148,9 +148,14 @@ official ZIP/HDF5 files. No curves are digitized from the published image.
 
 ## Turner L=32 server workflow
 
-The staged server driver writes an atomic plan/manifest and supports
-`--stage plan|basis|hamiltonian|diagonalize|observables|all`. Inspect the
-resource estimate without computing:
+The staged server driver uses the native independent engine and supports
+`--stage plan|basis|hamiltonian|diagonalize|observables|validate|figures|all`.
+Every completed stage is skipped only after its artifact SHA-256 is verified;
+missing predecessors and corrupt artifacts fail closed. `eigensystem.h5` and
+`observables.h5` remain separate, so observables never copy the dense
+eigenvector file. Task 6 `all` stops after `validate`; `figures` deliberately
+fails closed until the independent renderers from Tasks 7/8 are connected.
+Inspect the resource estimate without computing:
 
 ```bash
 python3 scripts/turner2018_l32_server.py \
@@ -158,26 +163,69 @@ python3 scripts/turner2018_l32_server.py \
   --output-dir tracks/ed/results/turner-2018/l32-server
 ```
 
-The L=32 compute stages fail closed until QuSpin 1.0.1's direct constrained
-imported/user basis, translation reduction, and reflection reduction have been
-proved against the existing small-L implementation and official small-L data.
-This guard prevents an accidental scan of all `2**32` bitstrings and prevents a
-server allocation from being treated as ready on the strength of an untested
-basis adapter.
+The production path directly enumerates constrained states and constructs
+dihedral orbits; it never scans all `2**L` bitstrings. QuSpin is an optional
+small-system cross-check only and is not required by the native engine.
 
 The qdeshell profile records a distant queue estimate for `qdagnormal` and
-requires explicit user ratification before any real submission. Validate the
-request only; do not remove `--test-only`:
+requires explicit user ratification before any real submission. Set
+`TURNER_LENGTH` to `28`, `30`, or `32`, then validate the request only; do not
+remove `--test-only`:
 
 ```bash
+export TURNER_LENGTH=32
 scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_l32_qdagnormal.sbatch
 ```
 
-The job requests one node and task, 64 CPUs, 512 GB, 12 hours, and the
+The qdeshell job requests one node and task, 64 CPUs, 512 GB, 24 hours, and the
 partition-required `gpu:A800:1`. Set either `TURNER_OFFLINE_IMAGE` to a
 pre-staged Apptainer image or `TURNER_PYTHON` to a pre-staged offline Python
 environment. Set `TURNER_OUTPUT_DIR` under an allowed profile result root.
 Never embed credentials in the job file.
+
+For SCNet, first inspect the live queue configuration; no partition name is
+assumed:
+
+```bash
+sinfo -o "%P %c %m %G %l %a"
+scontrol show partition
+```
+
+After selecting values shown by those probes, validate a CPU-only request.
+Partition is required; account and QOS are optional and are supplied through
+the `sbatch` CLI rather than hard-coded in the provider-neutral script:
+
+```bash
+export SCNET_PARTITION="value-from-sinfo"
+export SCNET_ACCOUNT=""
+export SCNET_QOS=""
+export TURNER_LENGTH=32
+
+scnet_args=(--test-only --partition="$SCNET_PARTITION")
+[[ -z "$SCNET_ACCOUNT" ]] || scnet_args+=(--account="$SCNET_ACCOUNT")
+[[ -z "$SCNET_QOS" ]] || scnet_args+=(--qos="$SCNET_QOS")
+sbatch "${scnet_args[@]}" scripts/turner2018_l32_scnet.sbatch
+```
+
+The SCNet script requests one node, 64 CPUs, 512 GB, and 24 hours. It does not
+request a GPU. If the selected queue requires one, add the exact
+probe-confirmed `--gres` value to `scnet_args`; do not guess it. These commands
+are probes or test-only validation, not authorization for a real submission.
+
+The Task 6 offline wheelhouse is a local, gitignored staging artifact for
+CPython 3.12 on manylinux x86_64. It contains exactly NumPy 2.4.6, SciPy 1.18.0,
+and h5py 3.16.0. Verify and install it without an index:
+
+```bash
+WHEELHOUSE=.external/task6-wheelhouse-cp312-manylinux-x86_64
+(cd "$WHEELHOUSE" && sha256sum -c SHA256SUMS)
+python3.12 -m venv /tmp/turner-offline-proof
+/tmp/turner-offline-proof/bin/python -m pip install \
+  --no-index --find-links "$WHEELHOUSE" \
+  numpy==2.4.6 scipy==1.18.0 h5py==3.16.0
+/tmp/turner-offline-proof/bin/python -c \
+  "import numpy, scipy, h5py; print(numpy.__version__, scipy.__version__, h5py.__version__)"
+```
 
 ## References
 

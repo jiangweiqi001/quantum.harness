@@ -24,6 +24,8 @@ from turner2018_l32_server import (  # noqa: E402
     atomic_write_json,
     dense_resource_estimate,
     main,
+    parse_memory_bytes,
+    resolve_declared_memory_bytes,
     require_stage,
 )
 
@@ -53,14 +55,23 @@ class TurnerL32PlanTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "basis.*not complete"):
                 require_stage(root, "basis")
 
+            artifact = root / "basis.npz"
+            artifact.write_bytes(b"basis")
             atomic_write_json(
                 root / "stages" / "basis.json",
-                {"stage": "basis", "status": "complete"},
+                {
+                    "stage": "basis",
+                    "status": "complete",
+                    "artifact": {
+                        "path": "basis.npz",
+                        "sha256": __import__("hashlib").sha256(b"basis").hexdigest(),
+                    },
+                },
             )
             manifest = require_stage(root, "basis")
             self.assertEqual(manifest["stage"], "basis")
 
-    def test_plan_cli_writes_fail_closed_manifest(self):
+    def test_plan_cli_reports_native_l32_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
                 [
@@ -79,32 +90,201 @@ class TurnerL32PlanTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             manifest = json.loads((Path(directory) / "manifest.json").read_text())
-            self.assertEqual(manifest["readiness"], "blocked")
+            self.assertEqual(manifest["readiness"], "ready")
             self.assertEqual(manifest["basis"]["sector_dimension"], 77_436)
             self.assertEqual(manifest["solver"]["driver"], "evd")
             self.assertFalse(manifest["solver"]["check_finite"])
             self.assertTrue(manifest["solver"]["overwrite_a"])
-            self.assertEqual(manifest["artifacts"]["hamiltonian"], "hamiltonian.csr.npz")
-            self.assertEqual(manifest["artifacts"]["results"], "results.h5")
-
-    def test_l32_basis_refuses_without_local_quspin_validation_stamp(self):
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPTS / "turner2018_l32_server.py"),
-                    "--stage",
-                    "basis",
-                    "--length",
-                    "32",
-                    "--output-dir",
-                    directory,
-                ],
-                text=True,
-                capture_output=True,
+            self.assertEqual(
+                manifest["resources"]["minimum_requested_bytes"],
+                239_853_363_840,
             )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("validated QuSpin 1.0.1 imported-basis proof", result.stderr)
+            self.assertEqual(manifest["artifacts"]["hamiltonian"], "hamiltonian.csr.npz")
+            self.assertEqual(manifest["artifacts"]["eigensystem"], "eigensystem.h5")
+            self.assertEqual(manifest["artifacts"]["observables"], "observables.h5")
+
+    def test_l32_basis_has_no_unconditional_quspin_refusal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch(
+                "turner2018_l32_server.build_orbit_basis",
+                side_effect=RuntimeError("native basis reached"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "native basis reached"):
+                    main(
+                        [
+                            "--stage",
+                            "basis",
+                            "--length",
+                            "32",
+                            "--output-dir",
+                            directory,
+                        ]
+                    )
+
+    def test_memory_parser_accepts_slurm_units_and_per_cpu(self):
+        self.assertEqual(parse_memory_bytes("512G"), 512 * 2**30)
+        self.assertEqual(parse_memory_bytes("512GB"), 512 * 10**9)
+        self.assertEqual(parse_memory_bytes("524288M"), 524288 * 2**20)
+        self.assertEqual(parse_memory_bytes("524288"), 524288 * 2**20)
+        self.assertEqual(
+            resolve_declared_memory_bytes(
+                {"SLURM_MEM_PER_CPU": "8192", "SLURM_CPUS_PER_TASK": "64"}
+            ),
+            8192 * 64 * 2**20,
+        )
+
+
+@unittest.skipUnless(
+    importlib.util.find_spec("numpy")
+    and importlib.util.find_spec("scipy")
+    and importlib.util.find_spec("h5py"),
+    "local NumPy/SciPy/h5py stack is not installed",
+)
+class TurnerRestartWorkflowTests(unittest.TestCase):
+    def run_stage(self, output: Path, stage: str, *extra: str) -> tuple[int, str]:
+        stdout = []
+        with mock.patch("builtins.print", side_effect=lambda *args, **_: stdout.append(" ".join(map(str, args)))):
+            code = main(
+                [
+                    "--stage",
+                    stage,
+                    "--length",
+                    "10",
+                    "--output-dir",
+                    str(output),
+                    "--declared-memory",
+                    "1G",
+                    "--chunk-columns",
+                    "4",
+                    *extra,
+                ]
+            )
+        return code, "\n".join(stdout)
+
+    def test_all_computational_stages_restart_and_skip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            code, first = self.run_stage(output, "all")
+            self.assertEqual(code, 0)
+            self.assertIn("completed stage=validate", first)
+            self.assertFalse((output / "stages" / "figures.json").exists())
+
+            mtimes = {
+                path.name: path.stat().st_mtime_ns
+                for path in (
+                    output / "basis.npz",
+                    output / "hamiltonian.csr.npz",
+                    output / "eigensystem.h5",
+                    output / "observables.h5",
+                    output / "validation" / "metrics.json",
+                )
+            }
+            code, restarted = self.run_stage(output, "all")
+            self.assertEqual(code, 0)
+            for stage in ("plan", "basis", "hamiltonian", "diagonalize", "observables", "validate"):
+                self.assertIn(f"skipped stage={stage}", restarted)
+            self.assertEqual(
+                mtimes,
+                {
+                    path.name: path.stat().st_mtime_ns
+                    for path in (
+                        output / "basis.npz",
+                        output / "hamiltonian.csr.npz",
+                        output / "eigensystem.h5",
+                        output / "observables.h5",
+                        output / "validation" / "metrics.json",
+                    )
+                },
+            )
+
+    def test_predecessor_guard_rejects_out_of_order_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "required stage 'basis'.*not complete"):
+                self.run_stage(Path(directory), "hamiltonian")
+
+    def test_hamiltonian_reuses_persisted_orbit_basis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "basis")
+            with mock.patch(
+                "turner2018_l32_server.build_orbit_basis",
+                side_effect=AssertionError("basis must not be rebuilt"),
+            ):
+                self.run_stage(output, "hamiltonian")
+
+    def test_corrupt_completed_artifact_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "basis")
+            with (output / "basis.npz").open("ab") as handle:
+                handle.write(b"corrupt")
+
+            with self.assertRaisesRegex(RuntimeError, "sha256 mismatch"):
+                self.run_stage(output, "all")
+            failure = json.loads(
+                (output / "stages" / "basis.failure.json").read_text()
+            )
+            self.assertEqual(failure["status"], "failed")
+            self.assertIn("sha256 mismatch", failure["error"])
+
+    def test_eigensystem_and_observables_are_separate_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "all")
+            eigensystem = output / "eigensystem.h5"
+            observables = output / "observables.h5"
+            self.assertTrue(eigensystem.is_file())
+            self.assertTrue(observables.is_file())
+            before = eigensystem.read_bytes()
+            self.assertNotEqual(eigensystem, observables)
+            self.assertEqual(before, eigensystem.read_bytes())
+
+    def test_figures_stage_fails_closed_without_marking_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "all")
+            with self.assertRaisesRegex(RuntimeError, "figure renderer adapter is unavailable"):
+                self.run_stage(output, "figures")
+            self.assertFalse((output / "stages" / "figures.json").exists())
+
+    def test_insufficient_declared_memory_fails_before_dense_conversion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "basis")
+            self.run_stage(output, "hamiltonian")
+            with mock.patch("scipy.sparse.csr_matrix.toarray", side_effect=AssertionError("dense conversion")):
+                with self.assertRaises(MemoryError):
+                    main(
+                        [
+                            "--stage",
+                            "diagonalize",
+                            "--length",
+                            "10",
+                            "--output-dir",
+                            str(output),
+                            "--declared-memory",
+                            "1K",
+                        ]
+                    )
+            self.assertFalse((output / "stages" / "diagonalize.json").exists())
+            self.assertTrue((output / "stages" / "diagonalize.failure.json").exists())
+
+    def test_failure_record_does_not_replace_completed_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "basis")
+            manifest = (output / "stages" / "basis.json").read_bytes()
+            with mock.patch(
+                "turner2018_l32_server.validate_stage",
+                side_effect=RuntimeError("injected validation failure"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected validation failure"):
+                    self.run_stage(output, "basis")
+            self.assertEqual(manifest, (output / "stages" / "basis.json").read_bytes())
+            failure = json.loads(
+                (output / "stages" / "plan.failure.json").read_text()
+            )
+            self.assertEqual(failure["status"], "failed")
 
 
 class TurnerL32SlurmTests(unittest.TestCase):
@@ -117,15 +297,38 @@ class TurnerL32SlurmTests(unittest.TestCase):
             "#SBATCH --ntasks=1",
             "#SBATCH --cpus-per-task=64",
             "#SBATCH --mem=512G",
-            "#SBATCH --time=12:00:00",
+            "#SBATCH --time=24:00:00",
             "#SBATCH --gres=gpu:A800:1",
         ):
             self.assertIn(directive, text)
-        self.assertIn("OPENBLAS_NUM_THREADS=64", text)
-        self.assertIn("MKL_NUM_THREADS=64", text)
+        self.assertIn("OPENBLAS_NUM_THREADS=\"$SLURM_CPUS_PER_TASK\"", text)
+        self.assertIn("MKL_NUM_THREADS=\"$SLURM_CPUS_PER_TASK\"", text)
+        self.assertIn("TURNER_LENGTH", text)
+        self.assertRegex(text, r"28\|30\|32")
+        self.assertIn("--stage all", text.replace("\n", " "))
+        self.assertIn("--declared-memory 512G", text.replace("\n", " "))
         self.assertIn("TURNER_OFFLINE_IMAGE", text)
         self.assertIn("TURNER_OUTPUT_DIR", text)
         self.assertNotRegex(text, r"(?i)(password|api[_-]?key|access[_-]?token)\s*=")
+
+    def test_scnet_script_is_provider_neutral_and_cpu_only_by_default(self):
+        text = (SCRIPTS / "turner2018_l32_scnet.sbatch").read_text()
+        for directive in (
+            "#SBATCH --nodes=1",
+            "#SBATCH --ntasks=1",
+            "#SBATCH --cpus-per-task=64",
+            "#SBATCH --mem=512G",
+            "#SBATCH --time=24:00:00",
+        ):
+            self.assertIn(directive, text)
+        self.assertNotRegex(text, r"#SBATCH\s+--partition")
+        self.assertNotRegex(text, r"#SBATCH\s+--account")
+        self.assertNotRegex(text, r"#SBATCH\s+--qos")
+        self.assertNotRegex(text, r"#SBATCH\s+--gres")
+        self.assertIn("TURNER_LENGTH", text)
+        self.assertRegex(text, r"28\|30\|32")
+        self.assertIn("OPENBLAS_NUM_THREADS=\"$SLURM_CPUS_PER_TASK\"", text)
+        self.assertIn("--declared-memory 512G", text.replace("\n", " "))
 
     def test_documented_submission_is_test_only(self):
         text = (REPO / "tracks" / "ed" / "README.md").read_text()
@@ -139,6 +342,12 @@ class TurnerL32SlurmTests(unittest.TestCase):
             "submit --script scripts/turner2018_l32_qdagnormal.sbatch",
             text,
         )
+        self.assertIn('sinfo -o "%P %c %m %G %l %a"', text)
+        self.assertIn("scontrol show partition", text)
+        self.assertIn("turner2018_l32_scnet.sbatch", text)
+        self.assertIn("SCNET_PARTITION", text)
+        self.assertIn("SCNET_ACCOUNT", text)
+        self.assertIn("SCNET_QOS", text)
 
 
 @unittest.skipUnless(
@@ -295,6 +504,7 @@ class TurnerSmallLEquivalenceTests(unittest.TestCase):
             ["--stage=plan"],
             ["--length=32"],
             ["--chunk-columns=32"],
+            ["--declared-memory=512G"],
             ["--validate-small-l=10"],
             ["--official-data-dir=/tmp/official"],
         ]

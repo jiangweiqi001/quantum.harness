@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Restartable, fail-closed Turner PXP ED/FSA server workflow.
-
-The L=32 path is intentionally blocked until this checkout contains a local
-QuSpin 1.0.1 imported/user-basis validation proof. Small systems remain
-available for validating the stage mechanics and existing reference code.
-"""
+"""Restartable, fail-closed Turner PXP ED/FSA server workflow."""
 
 from __future__ import annotations
 
@@ -13,12 +8,26 @@ import hashlib
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from turner2018_ed_engine import assemble_reduced_hamiltonian, build_orbit_basis
+from turner2018_ed_artifacts import (
+    validate_stage,
+    write_basis_artifact,
+    write_eigensystem,
+    write_hamiltonian_artifact,
+    write_observables,
+)
+from turner2018_ed_engine import (
+    OrbitBasis,
+    assemble_reduced_hamiltonian,
+    build_orbit_basis,
+)
+from turner2018_ed_observables import compute_observables
+from turner2018_ed_solver import estimate_dense_resources, solve_full_eigensystem
 
 L32_FULL_DIMENSION = 4_870_847
 L32_SECTOR_DIMENSION = 77_436
@@ -27,7 +36,16 @@ SYMMETRY_FOLDED_FSA_SHELLS = 17
 SCHEMA_VERSION = "turner-l32-ed-fsa-v1"
 LOCAL_EQUIVALENCE_SCHEMA_VERSION = "turner-local-equivalence-v1"
 QUANTUM_MODEL = "H=sum_j P_(j-1) X_j P_(j+1), PBC"
-STAGES = ("plan", "basis", "hamiltonian", "diagonalize", "observables", "all")
+STAGES = (
+    "plan",
+    "basis",
+    "hamiltonian",
+    "diagonalize",
+    "observables",
+    "validate",
+    "figures",
+    "all",
+)
 LOCAL_VALIDATION_DIMENSIONS = {
     10: (123, 14),
     12: (322, 26),
@@ -51,7 +69,17 @@ STAGE_PREDECESSOR = {
     "hamiltonian": "basis",
     "diagonalize": "hamiltonian",
     "observables": "diagonalize",
+    "validate": "observables",
+    "figures": "validate",
 }
+COMPUTATIONAL_STAGES = (
+    "basis",
+    "hamiltonian",
+    "diagonalize",
+    "observables",
+    "validate",
+)
+FIGURES_ADAPTER: Callable[[Path, int], Path] | None = None
 
 
 def dense_resource_estimate(dimension: int) -> dict[str, int | float]:
@@ -79,14 +107,16 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
 
 
 def require_stage(output_dir: str | Path, stage: str) -> dict[str, Any]:
-    """Load a completed stage manifest or fail before touching downstream data."""
+    """Load a hash-validated completed stage or fail closed."""
     path = Path(output_dir) / "stages" / f"{stage}.json"
     if not path.is_file():
         raise RuntimeError(f"required stage {stage!r} is not complete: missing {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("stage") != stage or payload.get("status") != "complete":
-        raise RuntimeError(f"required stage {stage!r} is not complete: {path}")
-    return payload
+    try:
+        return validate_stage(Path(output_dir), stage)
+    except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as error:
+        raise RuntimeError(
+            f"required stage {stage!r} is not complete or valid: {error}"
+        ) from error
 
 
 def _sha256(path: Path) -> str:
@@ -122,6 +152,59 @@ def _package_versions() -> dict[str, str | None]:
         else:
             versions[name] = str(getattr(module, "__version__", "unknown"))
     return versions
+
+
+_MEMORY_PATTERN = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*([KMGTPE]?)(I?B)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_memory_bytes(value: str) -> int:
+    """Parse Slurm-style memory; a bare value is interpreted as MiB."""
+    match = _MEMORY_PATTERN.fullmatch(value)
+    if match is None:
+        raise ValueError(f"invalid memory declaration: {value!r}")
+    amount = float(match.group(1))
+    prefix = match.group(2).upper()
+    unit = (match.group(3) or "").upper()
+    if not prefix:
+        multiplier = 2**20 if not unit else 1
+    else:
+        exponent = "KMGTPE".index(prefix) + 1
+        multiplier = (1000 if unit == "B" else 1024) ** exponent
+    result = int(amount * multiplier)
+    if result < 1:
+        raise ValueError("declared memory must be positive")
+    return result
+
+
+def resolve_declared_memory_bytes(
+    environment: dict[str, str] | os._Environ[str],
+    explicit: str | None = None,
+) -> int:
+    """Resolve total declared memory from CLI or standard Slurm variables."""
+    if explicit is not None:
+        return parse_memory_bytes(explicit)
+    per_node = environment.get("SLURM_MEM_PER_NODE")
+    if per_node:
+        return parse_memory_bytes(per_node)
+    per_cpu = environment.get("SLURM_MEM_PER_CPU")
+    if per_cpu:
+        cpus = environment.get("SLURM_CPUS_ON_NODE")
+        if cpus is None:
+            cpus_per_task = int(environment.get("SLURM_CPUS_PER_TASK", "1"))
+            tasks = int(environment.get("SLURM_NTASKS", "1"))
+            cpu_count = cpus_per_task * tasks
+        else:
+            cpu_count = int(cpus)
+        if cpu_count < 1:
+            raise ValueError("declared Slurm CPU count must be positive")
+        return parse_memory_bytes(per_cpu) * cpu_count
+    raise RuntimeError(
+        "dense diagonalization requires --declared-memory or "
+        "SLURM_MEM_PER_NODE/SLURM_MEM_PER_CPU"
+    )
 
 
 def _max_abs_array(values: Any) -> float:
@@ -202,25 +285,24 @@ def _local_validation_provenance(invocation: list[str]) -> dict[str, Any]:
 
 
 def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]:
-    """Build the immutable scientific/resource plan and current readiness result."""
+    """Build the immutable scientific/resource plan."""
     dimension = L32_SECTOR_DIMENSION if length == 32 else None
     packages = _package_versions()
-    quspin_proof_present = packages["quspin"] == "1.0.1" and (
-        output_dir / "validation" / "quspin_imported_basis_proof.json"
-    ).is_file()
-    readiness = "ready" if length != 32 else "blocked"
-    blocker = None
-    if readiness == "blocked":
-        blocker = (
-            "L=32 direct QuSpin imported/user-basis translation/reflection "
-            "reduction is not locally proven; a proof file alone does not "
-            "enable the unimplemented adapter"
+    resources = dense_resource_estimate(dimension or 0)
+    if dimension is not None:
+        task3_estimate = estimate_dense_resources(dimension, vectors=True)
+        resources.update(
+            {
+                "matrix_bytes": task3_estimate.matrix_bytes,
+                "eigenvector_bytes": task3_estimate.eigenvector_bytes,
+                "minimum_requested_bytes": task3_estimate.minimum_requested_bytes,
+            }
         )
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "planned",
-        "readiness": readiness,
-        "blocker": blocker,
+        "readiness": "ready",
+        "blocker": None,
         "invocation": argv,
         "model": {
             "hamiltonian": QUANTUM_MODEL,
@@ -230,9 +312,9 @@ def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]
             "inversion": "even",
         },
         "basis": {
-            "constructor": "QuSpin 1.0.1 imported/user basis",
+            "constructor": "native direct dihedral-orbit basis",
             "enumeration": "direct constrained states; never scan 2**L",
-            "symmetry_reduction": "direct translation then reflection",
+            "symmetry_reduction": "direct k=0 inversion-even dihedral orbits",
             "full_constrained_dimension": (
                 L32_FULL_DIMENSION if length == 32 else None
             ),
@@ -253,222 +335,194 @@ def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]
         "observables": {
             "pr2": "sum_i |V_ij|**4, streamed by eigenvector-column chunks",
         },
-        "resources": dense_resource_estimate(dimension or 0),
+        "resources": resources,
         "artifacts": {
             "basis": "basis.npz",
             "hamiltonian": "hamiltonian.csr.npz",
-            "results": "results.h5",
+            "eigensystem": "eigensystem.h5",
+            "observables": "observables.h5",
             "validation": "validation/metrics.json",
         },
         "provenance": {
             "python": sys.version,
             "platform": platform.platform(),
             "packages": packages,
-            "quspin_proof_present": quspin_proof_present,
+            "quspin_role": "optional cross-check only",
             "git_revision": _git_revision(),
         },
     }
 
 
+def _write_hashed_json_stage(
+    output_dir: Path,
+    stage: str,
+    relative_path: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    target = output_dir / relative_path
+    atomic_write_json(target, payload)
+    stage_payload = {
+        "schema_version": SCHEMA_VERSION,
+        "stage": stage,
+        "status": "complete",
+        "artifact": {
+            "path": relative_path,
+            "sha256": _sha256(target),
+            "shape": [],
+            "dtype": "json",
+            "conventions": ["atomic-json", "sha256-validated"],
+        },
+    }
+    atomic_write_json(
+        output_dir / "stages" / f"{stage}.json",
+        stage_payload,
+    )
+    return stage_payload
+
+
 def write_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     plan = build_plan(length, output_dir, argv)
-    atomic_write_json(output_dir / "manifest.json", plan)
-    atomic_write_json(
-        output_dir / "stages" / "plan.json",
-        {"stage": "plan", "status": "complete", "readiness": plan["readiness"]},
-    )
+    _write_hashed_json_stage(output_dir, "plan", "manifest.json", plan)
     return plan
 
 
-def _refuse_unproven_l32(length: int, output_dir: Path) -> None:
-    if length != 32:
-        return
-    proof = output_dir / "validation" / "quspin_imported_basis_proof.json"
-    packages = _package_versions()
-    if packages["quspin"] != "1.0.1" or not proof.is_file():
+def _load_plan(output_dir: Path, length: int) -> dict[str, Any]:
+    require_stage(output_dir, "plan")
+    plan = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    planned_length = plan.get("model", {}).get("length")
+    if planned_length != length:
         raise RuntimeError(
-            "refusing L=32: no validated QuSpin 1.0.1 imported-basis proof; "
-            "run and inspect local small-L equivalence first"
+            f"output directory was planned for L={planned_length}, not L={length}"
         )
-    payload = json.loads(proof.read_text(encoding="utf-8"))
-    if payload.get("status") != "complete" or payload.get("quspin_version") != "1.0.1":
-        raise RuntimeError(
-            "refusing L=32: validated QuSpin 1.0.1 imported-basis proof is incomplete"
-        )
-    # A proof file alone is deliberately insufficient while the direct imported
-    # basis adapter remains unimplemented in this checkout.
-    raise RuntimeError(
-        "refusing L=32: QuSpin direct imported-basis adapter is not locally proven"
-    )
-
-
-def _atomic_save_npz(path: Path, **arrays: Any) -> None:
-    import numpy as np
-
-    partial = path.with_name(path.name + ".partial")
-    with partial.open("wb") as handle:
-        np.savez(handle, **arrays)
-    os.replace(partial, path)
+    return plan
 
 
 def run_basis(length: int, output_dir: Path) -> None:
-    _refuse_unproven_l32(length, output_dir)
-    from pxp_ed import constrained_basis, symmetry_basis_k0_inversion_even
-
-    basis = constrained_basis(length, pbc=True)
-    transform = symmetry_basis_k0_inversion_even(basis, length)
-    _atomic_save_npz(
-        output_dir / "basis.npz",
-        states=basis,
-        transform_data=transform.data,
-        transform_indices=transform.indices,
-        transform_indptr=transform.indptr,
-        transform_shape=transform.shape,
-    )
-    atomic_write_json(
-        output_dir / "stages" / "basis.json",
-        {
-            "stage": "basis",
-            "status": "complete",
-            "full_dimension": len(basis),
-            "sector_dimension": transform.shape[1],
-            "artifact_sha256": _sha256(output_dir / "basis.npz"),
-        },
+    basis = build_orbit_basis(length)
+    write_basis_artifact(
+        output_dir,
+        basis=basis.constrained_states,
+        representatives=basis.representatives,
+        orbit_sizes=basis.orbit_sizes,
+        length=length,
     )
 
 
-def _load_basis(path: Path):
+def _load_basis(path: Path) -> OrbitBasis:
     import numpy as np
-    import scipy.sparse as sp
 
     with np.load(path, allow_pickle=False) as data:
-        states = data["states"]
-        shape = tuple(int(value) for value in data["transform_shape"])
-        transform = sp.csc_matrix(
-            (data["transform_data"], data["transform_indices"], data["transform_indptr"]),
-            shape=shape,
+        required = {"basis", "representatives", "orbit_sizes", "length"}
+        if not required.issubset(data.files):
+            raise RuntimeError("basis artifact lacks restartable orbit metadata")
+        return OrbitBasis(
+            length=int(data["length"]),
+            constrained_states=np.asarray(data["basis"], dtype=np.uint64),
+            representatives=np.asarray(data["representatives"], dtype=np.uint64),
+            orbit_sizes=np.asarray(data["orbit_sizes"], dtype=np.uint8),
         )
-    return states, transform
 
 
 def run_hamiltonian(length: int, output_dir: Path) -> None:
-    import scipy.sparse as sp
-
     require_stage(output_dir, "basis")
-    _refuse_unproven_l32(length, output_dir)
-    from pxp_ed import pxp_hamiltonian
-
-    states, transform = _load_basis(output_dir / "basis.npz")
-    full = pxp_hamiltonian(states, length, pbc=True)
-    reduced = (transform.T @ full @ transform).tocsr()
-    target = output_dir / "hamiltonian.csr.npz"
-    partial = target.with_name(target.name + ".partial")
-    with partial.open("wb") as handle:
-        sp.save_npz(handle, reduced)
-    os.replace(partial, target)
-    atomic_write_json(
-        output_dir / "stages" / "hamiltonian.json",
-        {
-            "stage": "hamiltonian",
-            "status": "complete",
-            "shape": list(reduced.shape),
-            "nnz": reduced.nnz,
-            "artifact_sha256": _sha256(target),
-        },
+    basis = _load_basis(output_dir / "basis.npz")
+    if basis.length != length:
+        raise RuntimeError("basis artifact length does not match requested length")
+    write_hamiltonian_artifact(
+        output_dir,
+        hamiltonian=assemble_reduced_hamiltonian(basis),
     )
 
 
-def run_diagonalize(length: int, output_dir: Path) -> None:
-    import h5py
-    import numpy as np
-    import scipy.linalg
+def run_diagonalize(
+    length: int,
+    output_dir: Path,
+    declared_memory_bytes: int,
+    chunk_columns: int,
+) -> None:
     import scipy.sparse as sp
 
     require_stage(output_dir, "hamiltonian")
-    _refuse_unproven_l32(length, output_dir)
-    sparse = sp.load_npz(output_dir / "hamiltonian.csr.npz")
-    dense = np.asfortranarray(sparse.toarray(), dtype=np.float64)
-    if not dense.flags.f_contiguous or dense.dtype != np.float64:
-        raise RuntimeError("dense Hamiltonian must be Fortran-contiguous float64")
-    energies, vectors = scipy.linalg.eigh(
-        dense,
-        driver="evd",
-        overwrite_a=True,
-        check_finite=False,
+    matrix = sp.load_npz(output_dir / "hamiltonian.csr.npz").tocsr()
+    estimate = estimate_dense_resources(matrix.shape[0], vectors=True)
+    if declared_memory_bytes < estimate.minimum_requested_bytes:
+        raise MemoryError(
+            "declared memory is insufficient for dense diagonalization "
+            f"({declared_memory_bytes} < {estimate.minimum_requested_bytes})"
+        )
+    energies, vectors = solve_full_eigensystem(
+        matrix,
+        vectors=True,
+        declared_memory_bytes=declared_memory_bytes,
+        validation_chunk_columns=chunk_columns,
     )
-    target = output_dir / "results.h5"
-    partial = target.with_name(target.name + ".partial")
-    with h5py.File(partial, "w") as handle:
-        handle.attrs["schema_version"] = SCHEMA_VERSION
-        eig = handle.create_group("eigensystem")
-        eig.create_dataset("energies", data=energies)
-        eig.create_dataset("vectors", data=vectors, chunks=(vectors.shape[0], 1))
-    os.replace(partial, target)
-    atomic_write_json(
-        output_dir / "stages" / "diagonalize.json",
-        {
-            "stage": "diagonalize",
-            "status": "complete",
-            "dimension": len(energies),
-            "artifact_sha256": _sha256(target),
-        },
+    assert vectors is not None
+    write_eigensystem(
+        output_dir,
+        energies=energies,
+        vectors=vectors,
+        stage="diagonalize",
     )
-
-
-def _stream_pr2(vectors: Any, chunk_columns: int) -> Any:
-    import numpy as np
-
-    result = np.empty(vectors.shape[1], dtype=np.float64)
-    for start in range(0, vectors.shape[1], chunk_columns):
-        stop = min(start + chunk_columns, vectors.shape[1])
-        block = vectors[:, start:stop]
-        squared = np.square(block, dtype=np.float64)
-        result[start:stop] = np.sum(squared * squared, axis=0)
-    return result
 
 
 def run_observables(length: int, output_dir: Path, chunk_columns: int) -> None:
     import h5py
-    import numpy as np
+    import scipy.sparse as sp
 
     require_stage(output_dir, "diagonalize")
-    _refuse_unproven_l32(length, output_dir)
-    from pxp_ed import density_wave_state, pxp_hamiltonian
-    from turner2018_fig3 import fsa_basis
-
-    states, transform = _load_basis(output_dir / "basis.npz")
-    z2_state = density_wave_state(length, 2)
-    full_h = pxp_hamiltonian(states, length, pbc=True)
-    full_shells, beta = fsa_basis(full_h, states, z2_state, length)
-    folded = np.asarray(transform.T @ full_shells.T).T[: length // 2 + 1]
-    folded /= np.linalg.norm(folded, axis=1)[:, None]
-
-    path = output_dir / "results.h5"
-    partial = path.with_name(path.name + ".partial")
-    with h5py.File(path, "r") as source, h5py.File(partial, "w") as target:
-        source.copy("eigensystem", target)
-        vectors = source["eigensystem/vectors"]
-        observables = target.create_group("observables")
-        observables.create_dataset("pr2", data=_stream_pr2(vectors, chunk_columns))
-        fsa = target.create_group("fsa")
-        fsa.create_dataset("full_shell_vectors", data=full_shells)
-        fsa.create_dataset("full_beta", data=beta)
-        fsa.create_dataset("symmetry_folded_shell_vectors", data=folded)
-        fsa.attrs["full_shell_count"] = length + 1
-        fsa.attrs["symmetry_folded_shell_count"] = length // 2 + 1
-    os.replace(partial, path)
-    atomic_write_json(
-        output_dir / "stages" / "observables.json",
-        {
-            "stage": "observables",
-            "status": "complete",
-            "pr2_chunk_columns": chunk_columns,
-            "full_fsa_shell_count": length + 1,
-            "folded_fsa_shell_count": length // 2 + 1,
-            "artifact_sha256": _sha256(path),
-        },
+    require_stage(output_dir, "basis")
+    require_stage(output_dir, "hamiltonian")
+    basis = _load_basis(output_dir / "basis.npz")
+    matrix = sp.load_npz(output_dir / "hamiltonian.csr.npz").tocsr()
+    with h5py.File(output_dir / "eigensystem.h5", "r") as handle:
+        energies = handle["eigensystem/energies"][:]
+        vectors = handle["eigensystem/vectors"][:]
+    result = compute_observables(
+        basis,
+        matrix,
+        energies,
+        vectors,
+        chunk_columns=chunk_columns,
     )
+    arrays = {
+        name: value
+        for name, value in result.items()
+        if name not in {"energies", "eigenvectors", "validation_metadata"}
+    }
+    write_observables(output_dir, arrays)
+
+
+def run_validate(length: int, output_dir: Path) -> None:
+    validated = {
+        stage: require_stage(output_dir, stage)["artifact"]["sha256"]
+        for stage in ("basis", "hamiltonian", "diagonalize", "observables")
+    }
+    metrics = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "passed",
+        "passed": True,
+        "length": length,
+        "validated_stage_sha256": validated,
+    }
+    _write_hashed_json_stage(
+        output_dir,
+        "validate",
+        "validation/metrics.json",
+        metrics,
+    )
+
+
+def run_figures(length: int, output_dir: Path) -> None:
+    require_stage(output_dir, "validate")
+    if FIGURES_ADAPTER is None:
+        raise RuntimeError(
+            "figure renderer adapter is unavailable until Tasks 7/8; "
+            "figures stage remains incomplete"
+        )
+    artifact = Path(FIGURES_ADAPTER(output_dir, length))
+    if not artifact.is_file():
+        raise RuntimeError(f"figure renderer did not produce its artifact: {artifact}")
 
 
 def validate_small_l(
@@ -769,9 +823,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--chunk-columns", type=int, default=32)
+    parser.add_argument(
+        "--declared-memory",
+        help="total memory allocation (for example 512G); defaults to Slurm variables",
+    )
     parser.add_argument("--validate-small-l", type=int)
     parser.add_argument("--official-data-dir", type=Path)
     return parser
+
+
+def _record_failure(output_dir: Path, stage: str, error: Exception) -> None:
+    atomic_write_json(
+        output_dir / "stages" / f"{stage}.failure.json",
+        {
+            "stage": stage,
+            "status": "failed",
+            "error": f"{type(error).__name__}: {error}",
+        },
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -786,6 +855,7 @@ def main(argv: list[str] | None = None) -> int:
             "--dry-run",
             "--length",
             "--chunk-columns",
+            "--declared-memory",
             "--validate-small-l",
             "--official-data-dir",
         }
@@ -813,7 +883,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.chunk_columns < 1:
         raise SystemExit("--chunk-columns must be positive")
 
-    write_plan(args.length, args.output_dir, invoked)
+    plan_manifest = args.output_dir / "stages" / "plan.json"
+    try:
+        if plan_manifest.is_file():
+            _load_plan(args.output_dir, args.length)
+            print("skipped stage=plan", flush=True)
+        else:
+            write_plan(args.length, args.output_dir, invoked)
+            print("completed stage=plan", flush=True)
+    except Exception as error:
+        _record_failure(args.output_dir, "plan", error)
+        raise
     if args.validate_small_l is not None:
         metrics = validate_small_l(args.validate_small_l, args.official_data_dir)
         atomic_write_json(args.output_dir / "validation" / "metrics.json", metrics)
@@ -822,23 +902,47 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     requested = (
-        ("basis", "hamiltonian", "diagonalize", "observables")
+        COMPUTATIONAL_STAGES
         if args.stage == "all"
         else (args.stage,)
     )
     for stage in requested:
-        predecessor = STAGE_PREDECESSOR.get(stage)
-        if predecessor is not None:
-            require_stage(args.output_dir, predecessor)
-        if stage == "basis":
-            run_basis(args.length, args.output_dir)
-        elif stage == "hamiltonian":
-            run_hamiltonian(args.length, args.output_dir)
-        elif stage == "diagonalize":
-            run_diagonalize(args.length, args.output_dir)
-        elif stage == "observables":
-            run_observables(args.length, args.output_dir, args.chunk_columns)
-        print(f"completed stage={stage}", flush=True)
+        if stage == "plan":
+            continue
+        try:
+            stage_manifest = args.output_dir / "stages" / f"{stage}.json"
+            if stage_manifest.is_file():
+                validate_stage(args.output_dir, stage)
+                print(f"skipped stage={stage}", flush=True)
+                continue
+            predecessor = STAGE_PREDECESSOR.get(stage)
+            if predecessor is not None:
+                require_stage(args.output_dir, predecessor)
+            if stage == "basis":
+                run_basis(args.length, args.output_dir)
+            elif stage == "hamiltonian":
+                run_hamiltonian(args.length, args.output_dir)
+            elif stage == "diagonalize":
+                declared_memory = resolve_declared_memory_bytes(
+                    os.environ,
+                    args.declared_memory,
+                )
+                run_diagonalize(
+                    args.length,
+                    args.output_dir,
+                    declared_memory,
+                    args.chunk_columns,
+                )
+            elif stage == "observables":
+                run_observables(args.length, args.output_dir, args.chunk_columns)
+            elif stage == "validate":
+                run_validate(args.length, args.output_dir)
+            elif stage == "figures":
+                run_figures(args.length, args.output_dir)
+            print(f"completed stage={stage}", flush=True)
+        except Exception as error:
+            _record_failure(args.output_dir, stage, error)
+            raise
     return 0
 
 

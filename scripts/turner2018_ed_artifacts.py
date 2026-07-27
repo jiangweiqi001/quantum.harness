@@ -20,10 +20,13 @@ import scipy.sparse as sp
 
 SCHEMA_VERSION = "turner2018-independent-ed-v1"
 STAGE_ARTIFACT_NAMES = {
+    "plan": "manifest.json",
     "basis": "basis.npz",
     "hamiltonian": "hamiltonian.csr.npz",
     "eigensystem": "eigensystem.h5",
+    "diagonalize": "eigensystem.h5",
     "observables": "observables.h5",
+    "validate": "validation/metrics.json",
 }
 
 
@@ -260,13 +263,37 @@ def _publish_stage_transactional(
         _cleanup_temp(manifest_path.with_name(manifest_path.name + ".partial"))
 
 
-def write_basis_artifact(output_dir: Path, *, basis: np.ndarray) -> dict[str, Any]:
+def write_basis_artifact(
+    output_dir: Path,
+    *,
+    basis: np.ndarray,
+    representatives: np.ndarray | None = None,
+    orbit_sizes: np.ndarray | None = None,
+    length: int | None = None,
+) -> dict[str, Any]:
     output_dir = Path(output_dir)
     target = output_dir / "basis.npz"
     basis_array = np.asarray(basis, dtype=np.uint64)
 
+    representatives_array = (
+        None if representatives is None else np.asarray(representatives, dtype=np.uint64)
+    )
+    orbit_sizes_array = (
+        None if orbit_sizes is None else np.asarray(orbit_sizes, dtype=np.uint8)
+    )
+    if (representatives_array is None) != (orbit_sizes_array is None):
+        raise ValueError("representatives and orbit_sizes must be provided together")
+    if representatives_array is not None and representatives_array.shape != orbit_sizes_array.shape:
+        raise ValueError("representatives and orbit_sizes must have the same shape")
+
     def write_artifact() -> None:
-        _atomic_write_npz(target, lambda handle: np.savez(handle, basis=basis_array))
+        arrays: dict[str, np.ndarray] = {"basis": basis_array}
+        if representatives_array is not None and orbit_sizes_array is not None:
+            arrays["representatives"] = representatives_array
+            arrays["orbit_sizes"] = orbit_sizes_array
+        if length is not None:
+            arrays["length"] = np.asarray(int(length), dtype=np.int64)
+        _atomic_write_npz(target, lambda handle: np.savez(handle, **arrays))
 
     def build_artifact() -> ArtifactMeta:
         return ArtifactMeta(
@@ -274,7 +301,14 @@ def write_basis_artifact(output_dir: Path, *, basis: np.ndarray) -> dict[str, An
             sha256=_sha256(target),
             shape=[int(basis_array.shape[0])],
             dtype=str(basis_array.dtype),
-            conventions=["sorted-constrained-states"],
+            conventions=[
+                "sorted-constrained-states",
+                *(
+                    ["direct-dihedral-orbit-metadata"]
+                    if representatives_array is not None
+                    else []
+                ),
+            ],
         )
 
     return _publish_stage_transactional(
@@ -317,6 +351,7 @@ def write_eigensystem(
     *,
     energies: np.ndarray,
     vectors: np.ndarray | None,
+    stage: str = "eigensystem",
 ) -> dict[str, Any]:
     output_dir = Path(output_dir)
     target = output_dir / "eigensystem.h5"
@@ -351,7 +386,7 @@ def write_eigensystem(
         extra["vector_shape"] = [int(vectors_arr.shape[0]), int(vectors_arr.shape[1])]
     return _publish_stage_transactional(
         output_dir=output_dir,
-        stage="eigensystem",
+        stage=stage,
         artifact_path=target,
         write_artifact=write_artifact,
         build_artifact=build_artifact,
@@ -398,14 +433,13 @@ def _resolve_stage_artifact_path(output_dir: Path, stage: str, artifact_path_raw
         raise RuntimeError(f"absolute artifact paths are forbidden: {artifact_path_raw}")
     if ".." in artifact_relative.parts:
         raise RuntimeError(f"path traversal is forbidden: {artifact_path_raw}")
-    if len(artifact_relative.parts) != 1:
-        raise RuntimeError(f"nested artifact paths are forbidden: {artifact_path_raw}")
-
     expected = STAGE_ARTIFACT_NAMES.get(stage)
-    if expected is not None and artifact_relative.name != expected:
+    if expected is not None and artifact_relative.as_posix() != expected:
         raise RuntimeError(
-            f"stage/artifact-name mismatch: stage={stage} expected={expected} actual={artifact_relative.name}"
+            f"stage/artifact-name mismatch: stage={stage} expected={expected} actual={artifact_relative.as_posix()}"
         )
+    if expected is None and len(artifact_relative.parts) != 1:
+        raise RuntimeError(f"nested artifact paths are forbidden: {artifact_path_raw}")
 
     output_resolved = output_dir.resolve()
     artifact_path = (output_dir / artifact_relative).resolve()

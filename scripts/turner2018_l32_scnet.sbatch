@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=turner-l32-ed-fsa
-#SBATCH --partition=qdagnormal
+#SBATCH --job-name=turner-ed-fsa
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512G
 #SBATCH --time=24:00:00
-#SBATCH --gres=gpu:A800:1
-#SBATCH --output=turner-l32-%j.out
+#SBATCH --output=turner-ed-%j.out
 
 set -euo pipefail
 
@@ -20,9 +18,6 @@ export NUMEXPR_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 export OMP_PROC_BIND=spread
 export OMP_PLACES=cores
 
-# The qdeshell profile is offline. Point this at a pre-staged Apptainer image;
-# do not install packages or place credentials in this script.
-TURNER_OFFLINE_IMAGE="${TURNER_OFFLINE_IMAGE:-}"
 TURNER_LENGTH="${TURNER_LENGTH:-32}"
 case "$TURNER_LENGTH" in
   28|30|32) ;;
@@ -31,6 +26,8 @@ case "$TURNER_LENGTH" in
     exit 2
     ;;
 esac
+
+TURNER_OFFLINE_IMAGE="${TURNER_OFFLINE_IMAGE:-}"
 TURNER_OUTPUT_DIR="${TURNER_OUTPUT_DIR:-$HOME/quantum.harness/results/turner-l${TURNER_LENGTH}}"
 TURNER_REPO="${TURNER_REPO:-$HOME/quantum.harness}"
 TURNER_PYTHON="${TURNER_PYTHON:-$TURNER_REPO/.venv/bin/python}"
