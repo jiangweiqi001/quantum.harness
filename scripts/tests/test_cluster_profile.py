@@ -241,9 +241,12 @@ def test_public_lasg02_profile_is_safe_and_complete():
     root = cp.Path(__file__).resolve().parents[2]
     path = root / "skills/using-slurm/profiles/lasg02-student090.toml"
     mirror_path = root / ".agents/skills/using-slurm/profiles/lasg02-student090.toml"
+    agents_skills = root / ".agents/skills"
     profile = cp.load_profile(path)
 
     assert cp.validate(profile) == []
+    assert agents_skills.is_symlink()
+    assert agents_skills.readlink() == cp.Path("../skills")
     assert mirror_path.read_bytes() == path.read_bytes()
     assert profile["connection"]["repo_path_remote"] == (
         "/public/home/student090/quantum.harness"

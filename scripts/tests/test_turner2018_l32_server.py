@@ -1641,6 +1641,22 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
             'printf "%s" "$TURNER_LENGTH" > "$RUNNER_SENTINEL"\n'
         )
 
+    @staticmethod
+    def _valid_runner_environment(memory: str = "80000") -> dict[str, str]:
+        return {
+            **os.environ,
+            "TURNER_ALLOWED_LENGTHS": "22|24|26|28|30",
+            "TURNER_LENGTH": "22",
+            "SLURM_JOB_PARTITION": "ihicnormal",
+            "SLURM_JOB_ACCOUNT": "chenkun2025",
+            "SLURM_JOB_QOS": "user_student090",
+            "SLURM_JOB_NUM_NODES": "1",
+            "SLURM_NTASKS": "1",
+            "SLURM_CPUS_PER_TASK": "24",
+            "SLURM_MEM_PER_NODE": memory,
+            "SLURM_TIMELIMIT": "1440",
+        }
+
     def test_wrapper_has_exact_resources_and_canonical_runner_lookup(self):
         text = self.WRAPPER.read_text()
         for directive in (
@@ -1691,6 +1707,33 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(sentinel.read_text(), "30")
 
+    def test_wrapper_rejects_descendant_checkout_without_sourcing_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            approved_root = temporary / "approved-root"
+            attacker = approved_root / "descendant-checkout"
+            sentinel = temporary / "attacker-ran"
+            self._write_sentinel_runner(attacker, sentinel)
+            spool = self._synthetic_root_wrapper(approved_root)
+
+            result = subprocess.run(
+                ["bash", str(spool)],
+                env={
+                    **os.environ,
+                    "SLURM_SUBMIT_DIR": str(attacker),
+                    "TURNER_LENGTH": "22",
+                    "RUNNER_SENTINEL": str(sentinel),
+                },
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(
+                str(approved_root / "quantum.harness"), result.stderr
+            )
+            self.assertFalse(sentinel.exists())
+
     def test_wrapper_rejects_unset_missing_and_escaped_submit_dirs(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
@@ -1732,7 +1775,7 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(result.returncode, 2)
-            self.assertIn("outside", result.stderr)
+            self.assertIn("must resolve exactly", result.stderr)
             self.assertFalse(sentinel.exists())
 
     def test_runner_uses_approved_paths_runtime_and_existing_solver(self):
@@ -1778,18 +1821,10 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
         )
 
     def test_runner_rejects_length_resource_and_path_mismatches(self):
-        base = {
-            **os.environ,
-            "TURNER_ALLOWED_LENGTHS": "22|24|26|28|30",
-            "TURNER_LENGTH": "22",
-            "SLURM_CPUS_PER_TASK": "24",
-            "SLURM_MEM_PER_NODE": "80000M",
-        }
+        base = self._valid_runner_environment()
         cases = (
             ("TURNER_LENGTH", "32"),
             ("TURNER_LENGTH", "23"),
-            ("SLURM_CPUS_PER_TASK", "23"),
-            ("SLURM_MEM_PER_NODE", "79999M"),
             ("TURNER_REPO", "/tmp/checkout"),
             ("TURNER_OUTPUT_DIR", str(Path.home() / "results")),
             ("TURNER_PYTHON", "/usr/bin/python3"),
@@ -1805,6 +1840,70 @@ class TurnerLasg02SlurmTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(key, result.stderr)
+
+    def test_runner_accepts_bare_and_m_suffixed_80000_mib(self):
+        for memory in ("80000", "80000M"):
+            with self.subTest(memory=memory):
+                result = subprocess.run(
+                    ["bash", str(self.RUNNER)],
+                    env={
+                        **self._valid_runner_environment(memory),
+                        "TURNER_REPO": "/tmp/expected-later-path-rejection",
+                    },
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("TURNER_REPO", result.stderr)
+                self.assertNotIn("SLURM_MEM_PER_NODE", result.stderr)
+
+    def test_runner_rejects_every_scheduler_fact_mismatch_before_compute(self):
+        mismatches = (
+            ("SLURM_JOB_PARTITION", "other"),
+            ("SLURM_JOB_ACCOUNT", "other"),
+            ("SLURM_JOB_QOS", "other"),
+            ("SLURM_JOB_NUM_NODES", "2"),
+            ("SLURM_NTASKS", "2"),
+            ("SLURM_CPUS_PER_TASK", "23"),
+            ("SLURM_MEM_PER_NODE", "79999"),
+            ("SLURM_MEM_PER_NODE", "80000G"),
+            ("SLURM_TIMELIMIT", "1439"),
+        )
+        for key, value in mismatches:
+            with self.subTest(key=key, value=value):
+                result = subprocess.run(
+                    ["bash", str(self.RUNNER)],
+                    env={**self._valid_runner_environment(), key: value},
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(key, result.stderr)
+                self.assertNotIn("missing reviewed checkout", result.stderr)
+
+    def test_runner_requires_every_scheduler_fact_before_compute(self):
+        for key in (
+            "SLURM_JOB_PARTITION",
+            "SLURM_JOB_ACCOUNT",
+            "SLURM_JOB_QOS",
+            "SLURM_JOB_NUM_NODES",
+            "SLURM_NTASKS",
+            "SLURM_CPUS_PER_TASK",
+            "SLURM_MEM_PER_NODE",
+            "SLURM_TIMELIMIT",
+        ):
+            with self.subTest(key=key):
+                environment = self._valid_runner_environment()
+                environment.pop(key)
+                result = subprocess.run(
+                    ["bash", str(self.RUNNER)],
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(key, result.stderr)
+                self.assertNotIn("missing reviewed checkout", result.stderr)
 
     def test_lasg02_tracked_files_contain_no_private_connection_material(self):
         profile_path = (

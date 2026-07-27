@@ -40,13 +40,11 @@ canonical_submit_dir="$(realpath -e -- "$SLURM_SUBMIT_DIR" 2>/dev/null)" || {
   echo "cannot canonicalize SLURM_SUBMIT_DIR" >&2
   exit 2
 }
-case "$canonical_submit_dir" in
-  "$canonical_root"/*) ;;
-  *)
-    echo "SLURM_SUBMIT_DIR resolves outside $TURNER_SHARED_ROOT" >&2
-    exit 2
-    ;;
-esac
+expected_submit_dir="$canonical_root/quantum.harness"
+if [[ "$canonical_submit_dir" != "$expected_submit_dir" ]]; then
+  echo "SLURM_SUBMIT_DIR must resolve exactly to $expected_submit_dir" >&2
+  exit 2
+fi
 expected_runner="$canonical_submit_dir/scripts/turner2018_lasg02_run.sh"
 canonical_runner="$(realpath -e -- "$expected_runner" 2>/dev/null)" || {
   echo "LASG02 common runner is missing" >&2

@@ -4,8 +4,17 @@ set -euo pipefail
 
 : "${TURNER_ALLOWED_LENGTHS:?TURNER_ALLOWED_LENGTHS is required}"
 : "${TURNER_LENGTH:?TURNER_LENGTH is required}"
-: "${SLURM_CPUS_PER_TASK:?SLURM_CPUS_PER_TASK is required}"
-: "${SLURM_MEM_PER_NODE:?SLURM_MEM_PER_NODE is required}"
+
+for variable in \
+  SLURM_JOB_PARTITION SLURM_JOB_ACCOUNT SLURM_JOB_QOS \
+  SLURM_JOB_NUM_NODES SLURM_NTASKS SLURM_CPUS_PER_TASK \
+  SLURM_MEM_PER_NODE SLURM_TIMELIMIT
+do
+  if [[ -z "${!variable:-}" ]]; then
+    echo "$variable is required" >&2
+    exit 2
+  fi
+done
 
 case "|$TURNER_ALLOWED_LENGTHS|" in
   *"|$TURNER_LENGTH|"*) ;;
@@ -23,14 +32,27 @@ case "$TURNER_LENGTH" in
     ;;
 esac
 
-if [[ "$SLURM_CPUS_PER_TASK" != 24 ]]; then
-  echo "SLURM_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK does not match LASG02 Turner ED (expected 24)" >&2
+require_scheduler_value() {
+  local variable="$1"
+  local expected="$2"
+  local actual="${!variable}"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "$variable=$actual does not match LASG02 Turner ED (expected $expected)" >&2
+    exit 2
+  fi
+}
+
+require_scheduler_value SLURM_JOB_PARTITION ihicnormal
+require_scheduler_value SLURM_JOB_ACCOUNT chenkun2025
+require_scheduler_value SLURM_JOB_QOS user_student090
+require_scheduler_value SLURM_JOB_NUM_NODES 1
+require_scheduler_value SLURM_NTASKS 1
+require_scheduler_value SLURM_CPUS_PER_TASK 24
+if [[ "${SLURM_MEM_PER_NODE%M}" != 80000 ]]; then
+  echo "SLURM_MEM_PER_NODE=$SLURM_MEM_PER_NODE does not match LASG02 Turner ED (expected 80000 MiB)" >&2
   exit 2
 fi
-if [[ "$SLURM_MEM_PER_NODE" != 80000M ]]; then
-  echo "SLURM_MEM_PER_NODE=$SLURM_MEM_PER_NODE does not match LASG02 Turner ED (expected 80000M)" >&2
-  exit 2
-fi
+require_scheduler_value SLURM_TIMELIMIT 1440
 
 readonly TURNER_SHARED_ROOT="/public/home/student090"
 TURNER_REPO="${TURNER_REPO:-$TURNER_SHARED_ROOT/quantum.harness}"
