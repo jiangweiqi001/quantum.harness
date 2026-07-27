@@ -20,7 +20,7 @@ ZLP := zlp
 
 INSTALLABLE := quimb quspin julia itensors xdiag jax tensorcircuit-ng netket netket-gpu mpskit tenpy sse pepskit nctssos qmbcertify cpmc-lab classical-repro pdf-render node
 
-.PHONY: skills clean help install test site serve $(addprefix install-,$(INSTALLABLE))
+.PHONY: skills clean help install test site serve turner-data turner-fig2-itebd-stage1 turner-fig2-itebd-stage2 $(addprefix install-,$(INSTALLABLE))
 .PHONY: zulip-whoami zulip-pull zulip-send zulip-topics zulip-messages zulip-config
 
 help: ## Show available targets and installable tools
@@ -35,6 +35,19 @@ test: ## Run the Python script test suite with coverage
 		--cov=cluster_profile --cov=cluster_guardrail --cov=cluster_probe \
 		--cov=parameter_scan --cov=scaling_fit \
 		--cov-report=term-missing
+
+turner-data: ## Download and verify the Turner et al. 2018 source dataset
+	@.venv/bin/python scripts/turner2018_data.py
+
+turner-fig2-itebd-stage1: ## Run resumable Turner Fig. 2 iTEBD through t=12
+	@MPLCONFIGDIR=/tmp/quantum-harness-matplotlib .venv/bin/python \
+	  scripts/turner2018_fig2_itebd.py --state all --target-time 12 \
+	  --dt 0.05 --chi-max 400 --resume
+
+turner-fig2-itebd-stage2: ## Resume Turner Fig. 2 iTEBD through t=30
+	@MPLCONFIGDIR=/tmp/quantum-harness-matplotlib .venv/bin/python \
+	  scripts/turner2018_fig2_itebd.py --state all --target-time 30 \
+	  --dt 0.05 --chi-max 400 --resume
 
 skills: ## Install or sync Ion-managed skills
 	@set -e; \

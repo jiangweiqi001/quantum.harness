@@ -7,6 +7,7 @@ dependencies = [
     "h5py",
     "matplotlib",
     "numpy",
+    "physics-tenpy>=1.1.0",
     "pymupdf",
     "pymupdf4llm",
     "pytest",

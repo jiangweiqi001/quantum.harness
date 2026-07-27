@@ -1,0 +1,84 @@
+{
+  "doi": "10.5518/335",
+  "license": "CC BY 4.0",
+  "repository": "https://archive.researchdata.leeds.ac.uk/452/",
+  "files": [
+    {
+      "figure": "Fig. 2",
+      "name": "correlation_function_with_perturbations.zip",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/1/correlation_function_with_perturbations.zip",
+      "size": 42531,
+      "sha256": "b998e9d4b841673d0ee67f287b1db814a9926ba4864951930c6e1f473075ff39"
+    },
+    {
+      "figure": "Fig. 2",
+      "name": "corzz_Neel.dat",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/2/corzz_Neel.dat",
+      "size": 9310,
+      "sha256": "718a3c42e1c185ae89d6db7d1220aa8acf71a8d59451fdd1ca183ec35981e9e1"
+    },
+    {
+      "figure": "Fig. 3",
+      "name": "eigendecomposition.zip",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/3/eigendecomposition.zip",
+      "size": 44267000,
+      "sha256": "87418eb0381de777f41ea823a89d48d55c64362c15f35cbe6cdd29e9257a66a7"
+    },
+    {
+      "figure": "Fig. 2",
+      "name": "entanglement_entropy_with_perturbation.zip",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/4/entanglement_entropy_with_perturbation.zip",
+      "size": 40675,
+      "sha256": "093a2eb042653e0f285323f9b219b5c22720c897487baed183a171ea2607e375"
+    },
+    {
+      "figure": "Fig. 2",
+      "name": "entanglement_entropy_growth.zip",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/5/entanglement_entropy_growth.zip",
+      "size": 20675,
+      "sha256": "cddfbb2f6841cc51661462ed6150ee8c547b23085a51cd7e1ac6feabbe238b2b"
+    },
+    {
+      "figure": "Fig. 4",
+      "name": "energy_eigenvalues.zip",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/6/energy_eigenvalues.zip",
+      "size": 1829474,
+      "sha256": "21fc64a37a3d41770e81b999e23682568301fdf410ec92c1162ebda91179b626"
+    },
+    {
+      "figure": "Fig. 3",
+      "name": "forward-scattering.zip",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/7/forward-scattering.zip",
+      "size": 10977946,
+      "sha256": "6f34540125c61ed59e978c2cfaf8e80ceaa89f5dae1870997fe6850123fcba2a"
+    },
+    {
+      "figure": "Fig. 3",
+      "name": "meldiag_periodic_N30_k0_p0.h5",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/8/meldiag_periodic_N30_k0_p0.h5",
+      "size": 511424,
+      "sha256": "baf5eb9f51d72ecaa119d667ae2416665441b7b5cc543c173c0397d54951148d"
+    },
+    {
+      "figure": "Fig. 3",
+      "name": "overlaps_with_Neel_state.zip",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/9/overlaps_with_Neel_state.zip",
+      "size": 2253274,
+      "sha256": "4a179c917fe3441dda280fd2414b7c593af85baefd32e68e96cdeef265a813b2"
+    },
+    {
+      "figure": "Fig. 3",
+      "name": "participation_ratios.zip",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/10/participation_ratios.zip",
+      "size": 4771510,
+      "sha256": "c766038e1d5df1e173d5cff18aa77546e3ea96ee9255147d09427b04cea7301a"
+    },
+    {
+      "figure": "Fig. 4",
+      "name": "level_statistics.zip",
+      "url": "https://archive.researchdata.leeds.ac.uk/452/11/level_statistics.zip",
+      "size": 23107,
+      "sha256": "42854f72f7dfadecd9346350130eccf2f0cdf5a2df2462271709c6618b140619"
+    }
+  ]
+}
