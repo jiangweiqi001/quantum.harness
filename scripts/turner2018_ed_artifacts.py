@@ -46,20 +46,6 @@ def _fsync_file(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
-def _cleanup_partial(path: Path) -> None:
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return
-
-
-def _cleanup_temp(path: Path) -> None:
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return
-
-
 def _fsync_parent_directory(path: Path) -> None:
     fd = os.open(path.parent, os.O_RDONLY)
     try:
@@ -68,12 +54,25 @@ def _fsync_parent_directory(path: Path) -> None:
         os.close(fd)
 
 
-def _remove_path_durable(path: Path) -> None:
+def _unlink_if_exists_durable(path: Path) -> bool:
     try:
         path.unlink()
     except FileNotFoundError:
-        return
+        return False
     _fsync_parent_directory(path)
+    return True
+
+
+def _cleanup_partial(path: Path) -> None:
+    _unlink_if_exists_durable(path)
+
+
+def _cleanup_temp(path: Path) -> None:
+    _unlink_if_exists_durable(path)
+
+
+def _remove_path_durable(path: Path) -> None:
+    _unlink_if_exists_durable(path)
 
 
 def _git_revision() -> str | None:

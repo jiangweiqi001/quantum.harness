@@ -121,8 +121,11 @@ def test_first_publish_manifest_failure_rolls_back_to_no_stage_and_fsyncs_cleanu
     manifest = output_dir / "stages" / "eigensystem.json"
 
     original_replace = artifacts.os.replace
+    original_open = artifacts.os.open
+    original_close = artifacts.os.close
     original_fsync = artifacts.os.fsync
-    directory_fsyncs: list[int] = []
+    open_directories: dict[int, Path] = {}
+    directory_fsyncs: list[Path] = []
 
     def fail_manifest_replace(source, destination):
         src = Path(source)
@@ -131,13 +134,24 @@ def test_first_publish_manifest_failure_rolls_back_to_no_stage_and_fsyncs_cleanu
             raise RuntimeError("simulated first publish manifest failure")
         return original_replace(src, dst)
 
+    def tracking_open(path, flags, *args):
+        fd = original_open(path, flags, *args)
+        open_directories[fd] = Path(path).resolve()
+        return fd
+
+    def tracking_close(fd: int):
+        open_directories.pop(fd, None)
+        return original_close(fd)
+
     def tracking_fsync(fd: int):
         mode = stat.S_IFMT(artifacts.os.fstat(fd).st_mode)
         if mode == stat.S_IFDIR:
-            directory_fsyncs.append(fd)
+            directory_fsyncs.append(open_directories.get(fd, Path("UNKNOWN")))
         return original_fsync(fd)
 
     monkeypatch.setattr(artifacts.os, "replace", fail_manifest_replace)
+    monkeypatch.setattr(artifacts.os, "open", tracking_open)
+    monkeypatch.setattr(artifacts.os, "close", tracking_close)
     monkeypatch.setattr(artifacts.os, "fsync", tracking_fsync)
 
     with pytest.raises(RuntimeError, match="simulated first publish manifest failure"):
@@ -149,8 +163,9 @@ def test_first_publish_manifest_failure_rolls_back_to_no_stage_and_fsyncs_cleanu
     assert not (output_dir / "eigensystem.h5.backup").exists()
     assert not (output_dir / "stages" / "eigensystem.json.partial").exists()
     assert not (output_dir / "stages" / "eigensystem.json.backup").exists()
-    # Includes fsync from normal artifact publish and cleanup removal rollback.
-    assert len(directory_fsyncs) >= 2
+    fsynced_directories = set(directory_fsyncs)
+    assert output_dir.resolve() in fsynced_directories
+    assert (output_dir / "stages").resolve() in fsynced_directories
 
 
 def test_first_publish_artifact_replace_failure_leaves_no_fixed_target(tmp_path, monkeypatch):
