@@ -459,6 +459,46 @@ def test_allow_missing_official_marks_outputs_incomplete(tmp_path, monkeypatch):
     assert metrics["official_sources"]["entropy"]["available"] is False
 
 
+def test_render_figures_records_partial_status_banner_and_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    result_paths = []
+    for state in ("vacuum", "Z2", "Z3", "Z4"):
+        path = tmp_path / f"fig2_itebd_{state}.h5"
+        _write_result(path, state)
+        result_paths.append(path)
+    official_dir = tmp_path / "official"
+    _write_official_data(official_dir)
+
+    plt.close("all")
+    monkeypatch.setattr(plt, "close", lambda *args, **kwargs: None)
+    paper, diagnostics = render_figures(
+        result_paths,
+        official_dir,
+        tmp_path,
+        fit_window=(0.0, 3.0),
+        partial_status_text="PARTIAL SNAPSHOT",
+        partial_status_metadata={"mode": "snapshot", "fit_stop": 3.0},
+    )
+
+    assert paper.is_file()
+    assert diagnostics.is_file()
+    figures = [plt.figure(number) for number in plt.get_fignums()]
+    for figure in figures:
+        assert any(
+            text.get_text() == "PARTIAL SNAPSHOT" for text in figure.texts
+        )
+    metrics = json.loads(
+        (tmp_path / "fig2_itebd_metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics["partial_status"] == {
+        "text": "PARTIAL SNAPSHOT",
+        "metadata": {"mode": "snapshot", "fit_stop": 3.0},
+    }
+    plt.close("all")
+
+
 @pytest.mark.parametrize("state", ["vacuum", "Z3", "Z4"])
 def test_non_z2_state_renders_only_distinct_diagnostics(state, tmp_path):
     result = tmp_path / f"fig2_itebd_{state}.h5"

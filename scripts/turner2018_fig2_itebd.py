@@ -386,6 +386,19 @@ def _mark_incomplete(figure: plt.Figure, reason: str) -> None:
     )
 
 
+def _mark_partial_status(figure: plt.Figure, text: str) -> None:
+    figure.text(
+        0.5,
+        0.972,
+        text,
+        ha="center",
+        va="top",
+        color="dimgray",
+        fontsize=9,
+        fontweight="bold",
+    )
+
+
 def render_figures(
     result_paths: list[str | Path] | tuple[str | Path, ...],
     official_data_dir: str | Path,
@@ -393,6 +406,9 @@ def render_figures(
     fit_window: tuple[float, float],
     *,
     allow_missing_official: bool = False,
+    partial_status_text: str | None = None,
+    partial_status_metadata: dict[str, object] | None = None,
+    x_limit: float | None = None,
 ) -> tuple[Path | None, Path]:
     """Render the paper comparison and numerical diagnostics figures."""
     if fit_window[0] >= fit_window[1]:
@@ -444,6 +460,11 @@ def render_figures(
     }
     if incomplete_reason:
         metrics["incomplete_reason"] = incomplete_reason
+    if partial_status_text is not None:
+        metrics["partial_status"] = {
+            "text": partial_status_text,
+            "metadata": partial_status_metadata or {},
+        }
 
     for state in states:
         arrays = results[state]
@@ -529,8 +550,12 @@ def render_figures(
     for axis in diagnostic_axes:
         axis.legend(ncol=2, fontsize=7)
         axis.grid(alpha=0.2)
+        if x_limit is not None:
+            axis.set_xlim(0.0, float(x_limit))
     if incomplete_reason:
         _mark_incomplete(diagnostics, incomplete_reason)
+    if partial_status_text is not None:
+        _mark_partial_status(diagnostics, partial_status_text)
     diagnostics.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
     diagnostics_path = output_dir / f"fig2_itebd_diagnostics{suffix}.png"
     diagnostics.savefig(diagnostics_path, dpi=180)
@@ -637,8 +662,12 @@ def render_figures(
         for axis in axes:
             axis.legend(ncol=2, fontsize=7)
             axis.grid(alpha=0.2)
+            if x_limit is not None:
+                axis.set_xlim(0.0, float(x_limit))
         if incomplete_reason:
             _mark_incomplete(paper, incomplete_reason)
+        if partial_status_text is not None:
+            _mark_partial_status(paper, partial_status_text)
         paper.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
         paper_path = output_dir / f"fig2_itebd_paper{suffix}.png"
         paper.savefig(paper_path, dpi=180)
