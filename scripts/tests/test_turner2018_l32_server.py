@@ -1105,6 +1105,7 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
 
 
 class TurnerL32SlurmTests(unittest.TestCase):
+    DZESHELL_ROOT = "/work/share/giggleliu/jiangweiqi"
     DZESHELL_CLASSES = {
         "turner2018_dzeshell_l22_28.sbatch": {
             "lengths": "22|24|26|28",
@@ -1148,39 +1149,126 @@ class TurnerL32SlurmTests(unittest.TestCase):
                     f'TURNER_ALLOWED_LENGTHS="{expected["lengths"]}"', text
                 )
                 self.assertIn(
-                    'source "$SLURM_SUBMIT_DIR/scripts/turner2018_dzeshell_run.sh"',
+                    'source "$canonical_runner"',
                     text,
                 )
                 self.assertNotIn("BASH_SOURCE", text)
                 self.assertNotIn("turner2018_l32_server.py", text)
+                source_position = text.index('source "$canonical_runner"')
+                self.assertLess(text.index("realpath -e"), source_position)
+                self.assertLess(text.index("canonical_submit_dir="), source_position)
+                self.assertLess(text.index("canonical_runner="), source_position)
 
-    def test_copied_spool_wrapper_finds_runner_in_reviewed_submit_checkout(self):
+    def _synthetic_root_wrapper(self, root: Path) -> Path:
         wrapper = SCRIPTS / "turner2018_dzeshell_l30.sbatch"
+        spool = root.parent / "slurm-spool-copy"
+        spool.write_text(
+            wrapper.read_text().replace(self.DZESHELL_ROOT, str(root))
+        )
+        return spool
+
+    @staticmethod
+    def _write_sentinel_runner(submit: Path, sentinel: Path) -> None:
+        scripts = submit / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "turner2018_dzeshell_run.sh").write_text(
+            'printf "%s" "$TURNER_LENGTH" > "$RUNNER_SENTINEL"\n'
+        )
+
+    def test_copied_spool_wrapper_finds_runner_in_valid_shared_root(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            submit = root / "reviewed-checkout"
-            scripts = submit / "scripts"
-            scripts.mkdir(parents=True)
-            marker = root / "runner-called"
-            (scripts / "turner2018_dzeshell_run.sh").write_text(
-                'printf "%s" "$TURNER_LENGTH" > "$RUNNER_MARKER"\n'
-            )
-            spool = root / "slurm-spool-copy"
-            spool.write_bytes(wrapper.read_bytes())
+            temporary = Path(directory)
+            shared_root = temporary / "shared-root"
+            submit = shared_root / "reviewed-checkout"
+            sentinel = temporary / "runner-called"
+            self._write_sentinel_runner(submit, sentinel)
+            spool = self._synthetic_root_wrapper(shared_root)
 
             result = subprocess.run(
                 ["bash", str(spool)],
                 env={
                     **os.environ,
                     "SLURM_SUBMIT_DIR": str(submit),
-                    "RUNNER_MARKER": str(marker),
+                    "RUNNER_SENTINEL": str(sentinel),
                 },
                 text=True,
                 capture_output=True,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(marker.read_text(), "30")
+            self.assertEqual(sentinel.read_text(), "30")
+
+    def test_wrapper_rejects_outside_runner_without_side_effect(self):
+        wrapper = SCRIPTS / "turner2018_dzeshell_l30.sbatch"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            attacker = root / "attacker-checkout"
+            sentinel = root / "attacker-ran"
+            self._write_sentinel_runner(attacker, sentinel)
+
+            result = subprocess.run(
+                ["bash", str(wrapper)],
+                env={
+                    **os.environ,
+                    "SLURM_SUBMIT_DIR": str(attacker),
+                    "RUNNER_SENTINEL": str(sentinel),
+                },
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(self.DZESHELL_ROOT, result.stderr)
+            self.assertFalse(sentinel.exists())
+
+    def test_wrapper_rejects_unset_nonexistent_and_symlink_escaped_submit_dirs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            shared_root = temporary / "shared-root"
+            shared_root.mkdir()
+            spool = self._synthetic_root_wrapper(shared_root)
+
+            unset_environment = dict(os.environ)
+            unset_environment.pop("SLURM_SUBMIT_DIR", None)
+            unset = subprocess.run(
+                ["bash", str(spool)],
+                env=unset_environment,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(unset.returncode, 2)
+            self.assertIn("SLURM_SUBMIT_DIR is required", unset.stderr)
+
+            nonexistent = subprocess.run(
+                ["bash", str(spool)],
+                env={
+                    **os.environ,
+                    "SLURM_SUBMIT_DIR": str(shared_root / "missing"),
+                },
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(nonexistent.returncode, 2)
+            self.assertIn("existing directory", nonexistent.stderr)
+
+            attacker = temporary / "attacker-checkout"
+            sentinel = temporary / "symlink-attacker-ran"
+            self._write_sentinel_runner(attacker, sentinel)
+            escaped = shared_root / "escaped-checkout"
+            escaped.symlink_to(attacker, target_is_directory=True)
+            symlink_result = subprocess.run(
+                ["bash", str(spool)],
+                env={
+                    **os.environ,
+                    "SLURM_SUBMIT_DIR": str(escaped),
+                    "RUNNER_SENTINEL": str(sentinel),
+                },
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(symlink_result.returncode, 2)
+            self.assertIn("outside", symlink_result.stderr)
+            self.assertFalse(sentinel.exists())
 
     def test_dzeshell_common_runner_uses_shared_offline_paths(self):
         text = (SCRIPTS / "turner2018_dzeshell_run.sh").read_text()
