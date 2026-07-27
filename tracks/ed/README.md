@@ -190,14 +190,23 @@ appropriate request only; do not remove `--test-only`:
 
 ```bash
 # L=22, 24, 26, or 28: 8 CPUs, 1 GPU, 60000M
-TURNER_LENGTH=28 scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l22_28.sbatch
+ssh qdeshell 'cd /work/share/giggleliu/jiangweiqi/quantum.harness && sbatch --test-only --export=ALL,TURNER_LENGTH=28 scripts/turner2018_dzeshell_l22_28.sbatch'
 
 # L=30: 16 CPUs, 2 GPUs, 120000M
-TURNER_LENGTH=30 scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l30.sbatch
+ssh qdeshell 'cd /work/share/giggleliu/jiangweiqi/quantum.harness && sbatch --test-only --export=ALL,TURNER_LENGTH=30 scripts/turner2018_dzeshell_l30.sbatch'
 
 # L=32: 32 CPUs, 4 GPUs, 240000M
-TURNER_LENGTH=32 scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l32.sbatch
+ssh qdeshell 'cd /work/share/giggleliu/jiangweiqi/quantum.harness && sbatch --test-only --export=ALL,TURNER_LENGTH=32 scripts/turner2018_dzeshell_l32.sbatch'
 ```
+
+Accepted scheduler responses were test-only pseudo job IDs; no jobs were submitted:
+
+- L=28: `6753455`, estimated start `2028-07-31T11:28:59`.
+- L=30: `6753456`, estimated start `2028-07-31T15:19:49`.
+- L=32: `6753457`, estimated start `2028-07-31T15:19:49`.
+
+These estimates record the current queue blocker, not authorization for a real
+submission.
 
 All wrappers request one task for 24 hours and use the exact
 `gpu:NVIDIAA80080GBPCIeLC:<count>` GRES. The common runner defaults to the

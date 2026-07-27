@@ -1532,12 +1532,28 @@ class TurnerL32SlurmTests(unittest.TestCase):
         }
         for script, length in documented_lengths.items():
             expected = (
-                f"TURNER_LENGTH={length} scripts/harness_slurm.sh --profile "
-                "skills/using-slurm/profiles/qdeshell.toml submit --test-only "
-                f"--script scripts/{script}"
+                "ssh qdeshell 'cd /work/share/giggleliu/jiangweiqi/"
+                "quantum.harness && sbatch --test-only "
+                f"--export=ALL,TURNER_LENGTH={length} "
+                f"scripts/{script}'"
             )
             self.assertIn(expected, text)
-            self.assertNotIn(f"submit --script scripts/{script}", text)
+            self.assertNotIn(
+                f"TURNER_LENGTH={length} scripts/harness_slurm.sh", text
+            )
+            self.assertNotIn(
+                f"sbatch --export=ALL,TURNER_LENGTH={length}", text
+            )
+        self.assertIn("test-only pseudo job IDs; no jobs were submitted", text)
+        self.assertIn(
+            "L=28: `6753455`, estimated start `2028-07-31T11:28:59`", text
+        )
+        self.assertIn(
+            "L=30: `6753456`, estimated start `2028-07-31T15:19:49`", text
+        )
+        self.assertIn(
+            "L=32: `6753457`, estimated start `2028-07-31T15:19:49`", text
+        )
         self.assertNotIn("turner2018_l32_qdagnormal.sbatch", text)
         self.assertNotIn("qdagnormal", text)
         self.assertIn('sinfo -o "%P %c %m %G %l %a"', text)
@@ -1551,32 +1567,55 @@ class TurnerL32SlurmTests(unittest.TestCase):
         text = (REPO / "tracks" / "ed" / "README.md").read_text()
         match = re.search(
             r"```bash\n(# L=22, 24, 26, or 28:.*?"
-            r"turner2018_dzeshell_l32\.sbatch)\n```",
+            r"turner2018_dzeshell_l32\.sbatch')\n```",
             text,
             re.DOTALL,
         )
         self.assertIsNotNone(match)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            scripts = root / "scripts"
-            scripts.mkdir()
+            binaries = root / "bin"
+            binaries.mkdir()
             calls = root / "calls"
-            harness = scripts / "harness_slurm.sh"
-            harness.write_text(
-                '#!/usr/bin/env bash\nprintf "%s|%s\\n" '
-                '"${TURNER_LENGTH-unset}" "$*" >> "$CALLS"\n'
+            ssh = binaries / "ssh"
+            ssh.write_text(
+                '#!/usr/bin/env bash\nprintf "%s|%s|%s\\n" '
+                '"$#" "$1" "$2" >> "$CALLS"\n'
             )
-            harness.chmod(0o755)
+            ssh.chmod(0o755)
             result = subprocess.run(
                 ["bash", "-eu", "-o", "pipefail", "-c", match.group(1)],
                 cwd=root,
-                env={**os.environ, "TURNER_LENGTH": "99", "CALLS": str(calls)},
+                env={
+                    **os.environ,
+                    "PATH": f"{binaries}:{os.environ['PATH']}",
+                    "TURNER_LENGTH": "99",
+                    "CALLS": str(calls),
+                },
                 text=True,
                 capture_output=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            observed = [line.split("|", 1)[0] for line in calls.read_text().splitlines()]
-            self.assertEqual(observed, ["28", "30", "32"])
+            observed = calls.read_text().splitlines()
+            self.assertEqual(len(observed), 3)
+            for line, (script, length) in zip(
+                observed,
+                (
+                    ("turner2018_dzeshell_l22_28.sbatch", 28),
+                    ("turner2018_dzeshell_l30.sbatch", 30),
+                    ("turner2018_dzeshell_l32.sbatch", 32),
+                ),
+                strict=True,
+            ):
+                argc, alias, remote_command = line.split("|", 2)
+                self.assertEqual(argc, "2")
+                self.assertEqual(alias, "qdeshell")
+                self.assertIn("sbatch --test-only", remote_command)
+                self.assertIn(
+                    f"--export=ALL,TURNER_LENGTH={length}", remote_command
+                )
+                self.assertIn(f"scripts/{script}", remote_command)
+                self.assertNotIn("TURNER_LENGTH=99", remote_command)
 
 
 @unittest.skipUnless(

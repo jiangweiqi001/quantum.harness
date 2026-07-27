@@ -167,3 +167,62 @@ All checks passed!
 git diff --check
 exit 0
 ```
+
+## Post-review remote export correction
+
+The documented local `TURNER_LENGTH=<L> scripts/harness_slurm.sh ...` prefix
+did not cross the SSH boundary: the generic harness constructed a separate
+remote `sbatch --export=ALL` command. The Dzeshell instructions now use the
+smallest scoped correction: direct commands through the existing `qdeshell`
+alias with remote
+`sbatch --test-only --export=ALL,TURNER_LENGTH=<L>`. Generic harness behavior
+was not changed.
+
+The README records the accepted scheduler evidence as test-only pseudo job IDs,
+not submitted jobs:
+
+- L=28: `6753455`, estimated start `2028-07-31T11:28:59`.
+- L=30: `6753456`, estimated start `2028-07-31T15:19:49`.
+- L=32: `6753457`, estimated start `2028-07-31T15:19:49`.
+
+The no-real-submission gate remains explicit.
+
+### Remote export TDD evidence
+
+RED:
+
+```text
+.venv/bin/python -m pytest scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests::test_documented_submission_is_test_only scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests::test_documented_dzeshell_commands_scope_each_length -q
+2 failed in 0.32s
+```
+
+The failures showed that the README still contained local-only assignments and
+that executing its command block attempted the local harness rather than
+transmitting `TURNER_LENGTH` in the remote command.
+
+GREEN:
+
+```text
+.venv/bin/python -m pytest scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests::test_documented_submission_is_test_only scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests::test_documented_dzeshell_commands_scope_each_length -q
+2 passed in 0.29s
+```
+
+The command-block test replaces `ssh` with a recorder, executes the documented
+shell block with a conflicting local `TURNER_LENGTH=99`, and proves that each
+remote SSH command carries exactly its own
+`--export=ALL,TURNER_LENGTH=28|30|32`.
+
+### Remote export verification
+
+```text
+.venv/bin/python -m pytest scripts/tests/test_turner2018_l32_server.py::TurnerL32SlurmTests -q
+13 passed, 16 subtests passed in 0.35s
+```
+
+```text
+.venv/bin/python -m py_compile scripts/tests/test_turner2018_l32_server.py
+uvx ruff check --select E4,E7,E9,F scripts/tests/test_turner2018_l32_server.py
+All checks passed!
+git diff --check
+exit 0
+```
