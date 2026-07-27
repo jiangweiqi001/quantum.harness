@@ -342,24 +342,95 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
             self.assertNotEqual(eigensystem, observables)
             self.assertEqual(before, eigensystem.read_bytes())
 
-    def test_figures_stage_runs_fig3_hook_but_waits_for_task8_before_completion(self):
+    def test_figures_stage_publishes_only_after_fig3_and_fig4_accept(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             self.run_stage(output, "all")
             fig3_artifact = output / "figures" / "fig3.png"
+            fig4_artifact = output / "figures" / "fig4.png"
 
-            def render_fig3(_output, _length):
-                fig3_artifact.parent.mkdir()
-                fig3_artifact.touch()
-                return fig3_artifact
+            def render(path, payload, passed=True):
+                path.parent.mkdir(exist_ok=True)
+                path.write_bytes(payload)
+                path.with_suffix(".npz").write_bytes(b"npz-" + payload)
+                path.with_suffix(".json").write_text(
+                    json.dumps(
+                        {
+                            "source": "independent-ed",
+                            "acceptance": {
+                                "passed": passed,
+                                "generated_source": "independent-ed",
+                            },
+                            "generation_id": path.stem,
+                            "generation_assets": {
+                                "png_sha256": hashlib.sha256(payload).hexdigest(),
+                                "npz_sha256": hashlib.sha256(
+                                    b"npz-" + payload
+                                ).hexdigest(),
+                            },
+                        }
+                    )
+                )
+                return path
 
             with mock.patch(
                 "turner2018_l32_server.FIG3_RENDERER_ADAPTER",
-                side_effect=render_fig3,
-            ) as renderer:
-                with self.assertRaisesRegex(RuntimeError, "Task 8"):
+                side_effect=lambda *_: render(fig3_artifact, b"fig3"),
+            ) as fig3_renderer, mock.patch(
+                "turner2018_l32_server.FIG4_RENDERER_ADAPTER",
+                side_effect=lambda *_: render(fig4_artifact, b"fig4"),
+            ) as fig4_renderer:
+                self.run_stage(output, "figures")
+
+            fig3_renderer.assert_called_once_with(output, 10)
+            fig4_renderer.assert_called_once_with(output, 10)
+            manifest = require_stage(output, "figures")
+            summary = json.loads((output / manifest["artifact"]["path"]).read_text())
+            self.assertEqual(summary["fig3"]["sha256"], hashlib.sha256(b"fig3").hexdigest())
+            self.assertEqual(summary["fig4"]["sha256"], hashlib.sha256(b"fig4").hexdigest())
+            self.assertTrue(summary["acceptance"]["passed"])
+
+    def test_figures_stage_does_not_publish_when_fig4_rejects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.run_stage(output, "all")
+            fig3 = output / "figures" / "fig3.png"
+            fig4 = output / "figures" / "fig4.png"
+
+            def render(path, passed):
+                path.parent.mkdir(exist_ok=True)
+                payload = path.name.encode()
+                path.write_bytes(payload)
+                path.with_suffix(".npz").write_bytes(b"npz-" + payload)
+                path.with_suffix(".json").write_text(
+                    json.dumps(
+                        {
+                            "source": "independent-ed",
+                            "acceptance": {
+                                "passed": passed,
+                                "generated_source": "independent-ed",
+                            },
+                            "generation_assets": {
+                                "png_sha256": hashlib.sha256(payload).hexdigest(),
+                                "npz_sha256": hashlib.sha256(
+                                    b"npz-" + payload
+                                ).hexdigest(),
+                            },
+                        }
+                    )
+                )
+                return path
+
+            with mock.patch(
+                "turner2018_l32_server.FIG3_RENDERER_ADAPTER",
+                side_effect=lambda *_: render(fig3, True),
+            ), mock.patch(
+                "turner2018_l32_server.FIG4_RENDERER_ADAPTER",
+                side_effect=lambda *_: render(fig4, False),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Fig. 4 acceptance"):
                     self.run_stage(output, "figures")
-            renderer.assert_called_once_with(output, 10)
+
             self.assertFalse((output / "stages" / "figures.json").exists())
 
     def test_observables_and_validate_never_full_slice_eigenvectors(self):

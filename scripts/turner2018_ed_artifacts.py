@@ -28,6 +28,7 @@ STAGE_ARTIFACT_NAMES = {
     "diagonalize": "eigensystem.h5",
     "observables": "observables.h5",
     "validate": "validation/metrics.json",
+    "figures": "figures/manifest.json",
 }
 STAGE_INPUT_NAMES = {
     "plan": set(),
@@ -37,6 +38,7 @@ STAGE_INPUT_NAMES = {
     "diagonalize": {"hamiltonian"},
     "observables": {"basis", "hamiltonian", "diagonalize"},
     "validate": {"basis", "hamiltonian", "diagonalize", "observables"},
+    "figures": {"validate"},
 }
 
 
@@ -530,6 +532,7 @@ def _validate_internal_artifact(
         "observables": ["observables-only", "separate-from-eigensystem"],
         "plan": ["atomic-json", "sha256-validated"],
         "validate": ["atomic-json", "sha256-validated"],
+        "figures": ["atomic-json", "sha256-validated"],
     }
     if artifact.get("conventions") != expected_conventions.get(stage):
         raise RuntimeError(f"invalid artifact conventions for stage={stage}")
@@ -620,7 +623,7 @@ def _validate_internal_artifact(
                 total += int(dataset.size)
             actual_shape = [total]
             actual_dtype = "float64"
-    elif stage in {"plan", "validate"}:
+    elif stage in {"plan", "validate", "figures"}:
         document = json.loads(artifact_path.read_text(encoding="utf-8"))
         if not isinstance(document, dict):
             raise RuntimeError(f"{stage} artifact must be a JSON object")

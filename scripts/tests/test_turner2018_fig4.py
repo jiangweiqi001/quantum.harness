@@ -1,11 +1,15 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 from zipfile import ZipFile
 
+import h5py
 import numpy as np
 import pytest
 
+import turner2018_fig4 as fig4
+import turner2018_l32_server as server
 from pxp_ed import _reflect, _rotate, constrained_basis, pxp_hamiltonian
 from turner2018_fig4 import (
     FIG4_EXACT_SCHEMA_VERSION,
@@ -22,6 +26,7 @@ from turner2018_fig4 import (
     unfold_spectrum,
 )
 from turner2018_official import load_fig4_energies, load_fig4_histograms
+from turner2018_l32_server import main as server_main
 
 
 DATA_DIR = Path(".external/official-data/turner-2018")
@@ -327,3 +332,448 @@ def test_paper_exact_runner_rejects_nonfinite_json_metrics(tmp_path, monkeypatch
 
     with pytest.raises(ValueError, match="Out of range float values"):
         run_paper_exact_reconstruction(DATA_DIR, tmp_path)
+
+
+def _validated_independent_result(root: Path, length: int = 10) -> tuple[Path, np.ndarray]:
+    output = root / f"L{length}"
+    assert server_main(
+        [
+            "--stage",
+            "all",
+            "--length",
+            str(length),
+            "--output-dir",
+            str(output),
+            "--declared-memory",
+            "1G",
+            "--chunk-columns",
+            "4",
+        ]
+    ) == 0
+    with h5py.File(output / "eigensystem.h5", "r") as handle:
+        energies = handle["eigensystem/energies"][()]
+    return output, energies
+
+
+def _synthetic_independent(length: int, energies: np.ndarray) -> dict[str, object]:
+    return {
+        "source": "independent-ed",
+        "directory": Path(f"/validated/L{length}"),
+        "length": length,
+        "full_dimension": 999_999,
+        "sector_dimension": len(energies),
+        "energies": energies,
+        "source_hashes": {
+            "eigensystem.h5": "a" * 64,
+            "validation_metrics": "b" * 64,
+            "execution_fingerprint": "c" * 64,
+        },
+        "energy_dataset_metadata": {
+            "shape": [len(energies)],
+            "dtype": "float64",
+            "access": "full-energy-vector-only",
+        },
+        "eigenvector_metadata": {
+            "shape": [len(energies), len(energies)],
+            "dtype": "float64",
+            "chunks": [len(energies), 1],
+            "access": "metadata-only",
+        },
+    }
+
+
+def test_independent_renderer_uses_independent_spectra_for_all_generated_metrics(
+    tmp_path, monkeypatch
+):
+    independent_energies = np.linspace(-4.0, 3.0, 4000) ** 3
+    independent_energies.sort()
+    official_energies = np.linspace(-6.0, 2.0, 4000) ** 3
+    official_energies.sort()
+    independent_stats = paper_exact_level_statistics(independent_energies)
+    official_stats = paper_exact_level_statistics(official_energies)
+    official_xy = np.column_stack(
+        (
+            np.r_[0.0, PAPER_HISTOGRAM_CENTERS],
+            np.r_[0.0, official_stats["histogram_density"]],
+        )
+    )
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {28: _synthetic_independent(28, independent_energies)},
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {28: official_xy},
+    )
+
+    paths = fig4.render_independent_fig4(
+        tmp_path / "independent",
+        output_dir=tmp_path / "figure",
+        official_data_dir=tmp_path / "official",
+    )
+
+    overview = paths["figure_all"]
+    with np.load(overview.with_suffix(".npz"), allow_pickle=False) as arrays:
+        np.testing.assert_array_equal(
+            arrays["L28_histogram_counts"],
+            independent_stats["histogram_counts"],
+        )
+        np.testing.assert_array_equal(arrays["L28_official_xy"], official_xy)
+        assert arrays["L28_source"].item() == "independent-ed"
+        assert arrays["L28_official_source"].item() == "official-doi"
+    metrics = json.loads(overview.with_suffix(".json").read_text())
+    generated = metrics["lengths"]["28"]
+    assert generated["source"] == "independent-ed"
+    assert generated["window_count"] == len(independent_stats["window_energies"])
+    assert generated["spacing_count"] == len(independent_stats["spacings"])
+    assert generated["mean_spacing"] == pytest.approx(
+        float(np.mean(independent_stats["spacings"]))
+    )
+    assert generated["histogram_counts"] == independent_stats[
+        "histogram_counts"
+    ].tolist()
+    assert generated["official_mismatch"]["max_abs_density"] == pytest.approx(
+        float(
+            np.max(
+                np.abs(
+                    independent_stats["histogram_density"]
+                    - official_stats["histogram_density"]
+                )
+            )
+        )
+    )
+    assert paths["figure_L28"].is_file()
+    assert all(
+        item["source"] == "independent-ed"
+        for name, item in metrics["series"].items()
+        if not name.startswith("official_")
+    )
+
+
+def test_independent_renderer_records_missing_sizes_and_small_exact_window(
+    tmp_path, monkeypatch
+):
+    small = np.linspace(-2.0, 2.0, 455)
+    large = np.linspace(-3.0, 4.0, 4000) ** 3
+    large.sort()
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {
+            20: _synthetic_independent(20, small),
+            24: _synthetic_independent(24, large),
+        },
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {},
+    )
+
+    paths = fig4.render_independent_fig4(
+        tmp_path / "independent",
+        output_dir=tmp_path / "figure",
+        official_data_dir=None,
+    )
+
+    assert set(paths) == {"figure_all", "figure_L20", "figure_L24"}
+    metrics = json.loads(paths["figure_all"].with_suffix(".json").read_text())
+    assert metrics["available_independent_lengths"] == [20, 24]
+    assert metrics["missing_lengths_within_independent_range"] == [22]
+    assert metrics["lengths"]["20"]["statistics_available"] is False
+    assert metrics["lengths"]["20"]["window_bounds"] == [91, -273]
+    assert metrics["lengths"]["20"]["window_count"] == 91
+    assert metrics["lengths"]["20"]["histogram_counts"] is None
+    assert metrics["lengths"]["24"]["statistics_available"] is True
+    assert not (tmp_path / "figure" / "fig4_independent_L22.png").exists()
+
+
+def test_independent_loader_validates_stable_snapshot_without_reading_vectors(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "independent"
+    _output, expected = _validated_independent_result(root)
+    original_getitem = h5py.Dataset.__getitem__
+
+    def reject_vector_read(dataset, key):
+        if dataset.name.endswith("/vectors"):
+            raise AssertionError("Fig. 4 must never read eigenvectors")
+        return original_getitem(dataset, key)
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", reject_vector_read)
+
+    result = fig4.load_independent_fig4_results(root)[10]
+
+    np.testing.assert_array_equal(result["energies"], expected)
+    assert result["energy_dataset_metadata"]["access"] == "full-energy-vector-only"
+    assert result["eigenvector_metadata"]["access"] == "metadata-only"
+
+
+def test_independent_loader_rejects_stale_current_execution_fingerprint(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "independent"
+    _validated_independent_result(root)
+    changed = json.loads(json.dumps(server.build_execution_fingerprint()))
+    changed["sources"]["turner2018_fig4.py"] = "f" * 64
+    monkeypatch.setattr(server, "build_execution_fingerprint", lambda: changed)
+
+    with pytest.raises(RuntimeError, match="execution fingerprint"):
+        fig4.load_independent_fig4_results(root)
+
+
+def test_independent_loader_rejects_artifact_hash_corruption(tmp_path):
+    root = tmp_path / "independent"
+    output, _expected = _validated_independent_result(root)
+    with (output / "eigensystem.h5").open("ab") as handle:
+        handle.write(b"corruption")
+
+    with pytest.raises(RuntimeError, match="sha256 mismatch"):
+        fig4.load_independent_fig4_results(root)
+
+
+def test_independent_loader_rejects_wrong_scientific_model(tmp_path, monkeypatch):
+    root = tmp_path / "independent"
+    _validated_independent_result(root)
+    monkeypatch.setattr(fig4, "EXPECTED_MODEL", "wrong Hamiltonian")
+
+    with pytest.raises(RuntimeError, match="scientific model"):
+        fig4.load_independent_fig4_results(root)
+
+
+def test_independent_loader_consumes_open_validated_eigensystem_snapshot(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "independent"
+    output, expected = _validated_independent_result(root)
+    replacement = tmp_path / "replacement-eigensystem.h5"
+    replacement.write_bytes((output / "eigensystem.h5").read_bytes())
+    with h5py.File(replacement, "r+") as handle:
+        energies = handle["eigensystem/energies"]
+        energies[:] = energies[()] + 100.0
+    original_require_stage = server.require_stage
+    swapped = False
+
+    def swap_after_validation(directory, stage, validation_cache=None):
+        nonlocal swapped
+        result = original_require_stage(directory, stage, validation_cache)
+        if stage == "validate" and not swapped:
+            os.replace(replacement, output / "eigensystem.h5")
+            swapped = True
+        return result
+
+    monkeypatch.setattr(server, "require_stage", swap_after_validation)
+
+    loaded = fig4.load_independent_fig4_results(root)[10]
+
+    np.testing.assert_array_equal(loaded["energies"], expected)
+
+
+def test_fig4_cli_input_modes_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        fig4.build_parser().parse_args(
+            ["--length", "10", "--independent-results-root", "results"]
+        )
+    with pytest.raises(SystemExit):
+        fig4.build_parser().parse_args(
+            ["--paper-exact", "--independent-results-root", "results"]
+        )
+
+
+def test_independent_generation_publish_failure_restores_previous_triplet(
+    tmp_path, monkeypatch
+):
+    energies = np.linspace(-3.0, 4.0, 4000) ** 3
+    energies.sort()
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {28: _synthetic_independent(28, energies)},
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {},
+    )
+    output = tmp_path / "figure"
+    paths = fig4.render_independent_fig4(
+        tmp_path / "independent",
+        output_dir=output,
+        official_data_dir=None,
+    )
+    target = paths["figure_all"]
+    triplet = (target, target.with_suffix(".npz"), target.with_suffix(".json"))
+    before = {path: path.read_bytes() for path in triplet}
+    original_replace = fig4.os.replace
+
+    def fail_json(source, destination):
+        if Path(destination) == target.with_suffix(".json"):
+            raise OSError("injected Fig. 4 JSON rename failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(fig4.os, "replace", fail_json)
+    with pytest.raises(OSError, match="JSON rename failure"):
+        fig4.render_independent_fig4(
+            tmp_path / "independent",
+            output_dir=output,
+            official_data_dir=None,
+        )
+
+    assert {path: path.read_bytes() for path in triplet} == before
+    assert not list(output.glob("*.partial"))
+    assert not list(output.glob("*.backup"))
+
+
+@pytest.mark.parametrize("artifact", ["png", "npz", "json"])
+def test_independent_first_generation_partial_failure_leaves_no_triplet(
+    tmp_path, monkeypatch, artifact
+):
+    energies = np.linspace(-3.0, 4.0, 4000) ** 3
+    energies.sort()
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {28: _synthetic_independent(28, energies)},
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {},
+    )
+    output = tmp_path / "figure"
+    expected = output / "fig4_independent_all.png"
+
+    def fail_partial(partial, _payload):
+        with partial.open("wb") as handle:
+            handle.write(b"incomplete")
+            handle.flush()
+            os.fsync(handle.fileno())
+        raise OSError(f"injected {artifact} write failure")
+
+    monkeypatch.setattr(fig4, f"_write_{artifact}_partial", fail_partial)
+    with pytest.raises(OSError, match=f"{artifact} write failure"):
+        fig4.render_independent_fig4(
+            tmp_path / "independent",
+            output_dir=output,
+            official_data_dir=None,
+        )
+
+    assert not expected.exists()
+    assert not expected.with_suffix(".npz").exists()
+    assert not expected.with_suffix(".json").exists()
+    assert not list(output.glob("*.partial"))
+    assert not list(output.glob("*.backup"))
+
+
+@pytest.mark.parametrize("with_prior_generation", [False, True])
+@pytest.mark.parametrize("artifact", ["png", "npz", "json"])
+@pytest.mark.parametrize("failure_phase", ["creation", "flush", "fsync"])
+def test_independent_partial_creation_and_fsync_failures_are_cleaned(
+    tmp_path,
+    monkeypatch,
+    with_prior_generation,
+    artifact,
+    failure_phase,
+):
+    energies = np.linspace(-3.0, 4.0, 4000) ** 3
+    energies.sort()
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {28: _synthetic_independent(28, energies)},
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {},
+    )
+    output = tmp_path / "figure"
+    png = output / "fig4_independent_all.png"
+    targets = {
+        "png": png,
+        "npz": png.with_suffix(".npz"),
+        "json": png.with_suffix(".json"),
+    }
+    if with_prior_generation:
+        fig4.render_independent_fig4(
+            tmp_path / "independent",
+            output_dir=output,
+            official_data_dir=None,
+        )
+        before = {path: path.read_bytes() for path in targets.values()}
+    else:
+        before = {}
+    partial = targets[artifact].with_name(targets[artifact].name + ".partial")
+
+    def injected_failure(actual_partial, _payload):
+        assert actual_partial == partial
+        if failure_phase in {"flush", "fsync"}:
+            with actual_partial.open("wb") as handle:
+                handle.write(b"incomplete")
+                handle.flush()
+            raise OSError(f"injected {artifact} {failure_phase} failure")
+        raise OSError(f"injected {artifact} creation failure")
+
+    monkeypatch.setattr(fig4, f"_write_{artifact}_partial", injected_failure)
+    with pytest.raises(OSError, match=f"{artifact} {failure_phase} failure"):
+        fig4.render_independent_fig4(
+            tmp_path / "independent",
+            output_dir=output,
+            official_data_dir=None,
+        )
+
+    if with_prior_generation:
+        assert {path: path.read_bytes() for path in targets.values()} == before
+    else:
+        assert not any(path.exists() for path in targets.values())
+    assert not list(output.glob("*.partial"))
+    assert not list(output.glob("*.backup"))
+
+
+def test_independent_generation_backup_failure_preserves_previous_triplet(
+    tmp_path, monkeypatch
+):
+    energies = np.linspace(-3.0, 4.0, 4000) ** 3
+    energies.sort()
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {28: _synthetic_independent(28, energies)},
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {},
+    )
+    output = tmp_path / "figure"
+    paths = fig4.render_independent_fig4(
+        tmp_path / "independent",
+        output_dir=output,
+        official_data_dir=None,
+    )
+    target = paths["figure_all"]
+    triplet = (target, target.with_suffix(".npz"), target.with_suffix(".json"))
+    before = {path: path.read_bytes() for path in triplet}
+    original_link = fig4.os.link
+    calls = 0
+
+    def fail_second_backup(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected Fig. 4 backup failure")
+        return original_link(source, destination)
+
+    monkeypatch.setattr(fig4.os, "link", fail_second_backup)
+    with pytest.raises(OSError, match="backup failure"):
+        fig4.render_independent_fig4(
+            tmp_path / "independent",
+            output_dir=output,
+            official_data_dir=None,
+        )
+
+    assert {path: path.read_bytes() for path in triplet} == before
+    assert not list(output.glob("*.partial"))
+    assert not list(output.glob("*.backup"))

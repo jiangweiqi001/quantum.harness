@@ -97,8 +97,14 @@ def _render_fig3_adapter(output_dir: Path, length: int) -> Path:
     return render_fig3_stage(output_dir, length)
 
 
+def _render_fig4_adapter(output_dir: Path, length: int) -> Path:
+    from turner2018_fig4 import render_fig4_stage
+
+    return render_fig4_stage(output_dir, length)
+
+
 FIG3_RENDERER_ADAPTER: Callable[[Path, int], Path] = _render_fig3_adapter
-FIGURES_ADAPTER: Callable[[Path, int], Path] | None = None
+FIG4_RENDERER_ADAPTER: Callable[[Path, int], Path] = _render_fig4_adapter
 
 
 class StaleStageError(RuntimeError):
@@ -342,6 +348,7 @@ def _source_hashes() -> dict[str, str]:
     names = (
         "pxp_ed.py",
         "turner2018_fig3.py",
+        "turner2018_fig4.py",
         "turner2018_ed_artifacts.py",
         "turner2018_ed_engine.py",
         "turner2018_ed_solver.py",
@@ -872,21 +879,61 @@ def run_validate(
     )
 
 
+def _accepted_figure(path: Path, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(f"{label} renderer did not produce its artifact: {path}")
+    json_path = path.with_suffix(".json")
+    npz_path = path.with_suffix(".npz")
+    if not json_path.is_file() or not npz_path.is_file():
+        raise RuntimeError(f"{label} renderer did not produce complete sidecars")
+    metrics = json.loads(json_path.read_text(encoding="utf-8"))
+    if (
+        metrics.get("source") != "independent-ed"
+        or metrics.get("acceptance", {}).get("passed") is not True
+        or metrics.get("acceptance", {}).get("generated_source") != "independent-ed"
+    ):
+        raise RuntimeError(f"{label} acceptance/provenance check failed")
+    assets = metrics.get("generation_assets", {})
+    if (
+        assets.get("png_sha256") != _sha256(path)
+        or assets.get("npz_sha256") != _sha256(npz_path)
+    ):
+        raise RuntimeError(f"{label} generation asset hash check failed")
+    return {
+        "path": str(path.relative_to(path.parents[1])),
+        "sha256": _sha256(path),
+        "metrics_path": str(json_path.relative_to(json_path.parents[1])),
+        "metrics_sha256": _sha256(json_path),
+        "arrays_path": str(npz_path.relative_to(npz_path.parents[1])),
+        "arrays_sha256": _sha256(npz_path),
+        "generation_id": metrics.get("generation_id"),
+    }
+
+
 def run_figures(length: int, output_dir: Path) -> None:
     require_stage(output_dir, "validate")
     fig3_artifact = Path(FIG3_RENDERER_ADAPTER(output_dir, length))
-    if not fig3_artifact.is_file():
-        raise RuntimeError(
-            f"Fig. 3 renderer did not produce its artifact: {fig3_artifact}"
-        )
-    if FIGURES_ADAPTER is None:
-        raise RuntimeError(
-            "combined figure renderer remains unavailable until Task 8 supplies "
-            "Fig. 4; figures stage remains incomplete"
-        )
-    artifact = Path(FIGURES_ADAPTER(output_dir, length))
-    if not artifact.is_file():
-        raise RuntimeError(f"figure renderer did not produce its artifact: {artifact}")
+    fig3 = _accepted_figure(fig3_artifact, "Fig. 3")
+    fig4_artifact = Path(FIG4_RENDERER_ADAPTER(output_dir, length))
+    fig4 = _accepted_figure(fig4_artifact, "Fig. 4")
+    summary = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "passed",
+        "passed": True,
+        "length": length,
+        "source": "independent-ed",
+        "fig3": fig3,
+        "fig4": fig4,
+        "acceptance": {"passed": True},
+    }
+    _write_hashed_json_stage(
+        output_dir,
+        "figures",
+        "figures/manifest.json",
+        summary,
+        inputs=_stage_inputs(output_dir, "figures"),
+        plan_sha256=_plan_config_sha256(output_dir),
+    )
 
 
 def validate_small_l(

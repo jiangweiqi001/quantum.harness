@@ -35,7 +35,8 @@ Reproduce three figures:
   recovery.
 - **Fig. 4:** use the adjacent-gap ratio as an initial diagnostic, then reproduce
   the paper's unfolded level-spacing distribution with its stated spectral
-  window and zero-mode exclusion.
+  window. The negative-energy paper window excludes the central zero modes;
+  the paper-exact function does not apply a separate zero-mode filter.
 
 Install the locked Python 3.12 environment with:
 
@@ -86,6 +87,10 @@ high-memory `L=28–32` run:
 # Fig. 4 paper-exact: reconstruct L=28/30/32 from official energy spectra,
 # compare official xydata, and write NPZ/JSON/PNG validation artifacts
 .venv/bin/python scripts/turner2018_fig4.py --paper-exact
+
+# Fig. 4 from recursively validated independent Task 6 spectra
+.venv/bin/python scripts/turner2018_fig4.py \
+  --independent-results-root tracks/ed/results/turner-2018/task7-independent
 
 # Sparse basis/Hamiltonian resource profile through L=20
 .venv/bin/python scripts/turner2018_scaling.py
@@ -158,8 +163,9 @@ when every input is current; stale execution plans or stale/corrupt inputs are
 rejected unless an explicit controlled rebuild is requested.
 `eigensystem.h5` and
 `observables.h5` remain separate, so observables never copy the dense
-eigenvector file. Task 6 `all` stops after `validate`; `figures` deliberately
-fails closed until the independent renderers from Tasks 7/8 are connected.
+eigenvector file. Task 6 `all` stops after `validate`; `figures` runs both
+independent renderers and publishes its combined stage only after both
+transactional generations pass provenance and acceptance checks.
 Inspect the resource estimate without computing:
 
 ```bash
