@@ -357,3 +357,75 @@ Thus neither Task 3 nor Task 4 adds the hidden 47.971 GB Gram/identity/differenc
 ### Remaining concern
 
 Orthogonality validation is intentionally not exhaustive over all `D(D−1)/2` column pairs: it validates every norm and a deterministic bounded sample, as required. The sample count is configurable and reported, so production runs can increase it without changing the bounded-column memory shape.
+
+## Final pair-sampling validation fixes (2026-07-27)
+
+### RED evidence
+
+Command:
+```bash
+PYTHONPATH=scripts /home/footman/code/quantum.harness/.venv/bin/python -m pytest scripts/tests/test_turner2018_ed_observables.py::test_default_l32_pair_sampling_spans_early_middle_and_late_spectrum scripts/tests/test_turner2018_ed_observables.py::test_default_sampling_detects_nonorthogonal_late_spectrum_pair scripts/tests/test_turner2018_ed_observables.py::test_pair_sampling_stays_lazy_and_batch_bounded_for_huge_sample_count scripts/tests/test_turner2018_ed_observables.py::test_compute_observables_consumes_eigensystem_without_dense_solve -q
+```
+```text
+FFFF                                                                     [100%]
+3 failures: AttributeError: module 'turner2018_ed_validation' has no attribute 'sample_pair_batches'
+1 failure: KeyError: 'orthogonality_sampling_policy'
+4 failed in 0.86s
+```
+
+The failures established that pair generation had no lazy batch interface and that validation metadata did not state its sampling and pair-memory policy.
+
+### GREEN implementation and focused verification
+
+`sample_pair_batches` now yields at most `batch_size` pairs at a time. Validation sets that batch size from `chunk_columns`, so its only pair metadata is two `int64[pair_batch_size]` arrays. It never stores a sample-sized set or sample-sized/full-pair arrays. This remains true for every accepted `orthogonality_samples <= D(D-1)/2`; exhaustive requests cost time but not pair-metadata growth.
+
+The exact deterministic policy is:
+- when the requested/accepted sample count is at most `D-1`, first indices are midpoint-stratified over canonical first-index positions `[0,D-1)`, and partners are selected from the valid upper-index interval by deterministic SplitMix64 slots;
+- for larger sample counts, midpoint-stratified ranks from the complete lexicographic canonical-pair space are unranked one at a time;
+- both regimes produce distinct canonical pairs with `first < partner`, and the all-pairs request visits every pair once.
+
+Focused command:
+```bash
+PYTHONPATH=scripts /home/footman/code/quantum.harness/.venv/bin/python -m pytest scripts/tests/test_turner2018_ed_observables.py scripts/tests/test_turner2018_ed_solver.py -q
+```
+```text
+.......................................................................  [100%]
+71 passed in 1.66s
+```
+
+### Sampling and memory evidence
+
+Behavior probe:
+```text
+L32 first-index thirds=[1365, 1366, 1365] min=9 max=77425 samples=4096
+huge-request first_batch=23 peak_bytes=1260 unequal=True
+exhaustive-small-dimensions=2..64 unique-complete
+```
+
+The L32-shaped default sample therefore reaches early, middle, and late first-index regions rather than concentrating near zero. A regression duplicates a sampled late-spectrum pair while preserving both column norms and confirms orthogonality validation rejects it. The huge request is `499,999,500,000` pairs for `D=1,000,000`; consuming its first batch creates only 23 pairs and measured 1,260 bytes of traced Python allocation.
+
+`validation_metadata` and degenerate-invariant diagnostics now report:
+```text
+orthogonality_sampling_policy =
+  midpoint-stratified first indices with SplitMix64 partner slots when
+  samples <= D-1; otherwise midpoint-stratified canonical pair ranks
+orthogonality_pair_batch_size = min(chunk_columns, accepted samples)
+orthogonality_pair_metadata_memory =
+  bounded by two int64 arrays of pair_batch_size
+```
+
+This supersedes the earlier incomplete wording “deterministic bounded off-diagonal orthogonality samples”: the previous implementation was deterministic but its low-index prefix was biased and its set/array metadata was not bounded by validation chunk size.
+
+### Complete relevant regression
+
+Command:
+```bash
+PYTHONPATH=scripts /home/footman/code/quantum.harness/.venv/bin/python -m pytest scripts/tests/test_turner2018_ed_observables.py scripts/tests/test_turner2018_fig3.py scripts/tests/test_turner2018_ed_engine.py scripts/tests/test_turner2018_ed_solver.py scripts/tests/test_turner2018_ed_artifacts.py -q
+```
+```text
+........................................................................ [ 59%]
+.................................................                        [100%]
+121 passed in 8.28s
+```
+
+This is the prior complete 118-test set plus the three new pair-sampling regressions. It preserves all-column norm/residual validation, stable degenerate-subspace checks, FSA behavior, and Task 3 solver integration.

@@ -1,5 +1,6 @@
 import ast
 import inspect
+import tracemalloc
 
 import numpy as np
 import pytest
@@ -278,6 +279,67 @@ def test_degenerate_rotated_subspace_residual_is_stable():
     assert diagnostics["subspace_chunk_columns"] == 3
 
 
+def test_default_l32_pair_sampling_spans_early_middle_and_late_spectrum():
+    dimension = 77_436
+    batches = validation_module.sample_pair_batches(
+        dimension,
+        sample_count=4096,
+        batch_size=256,
+    )
+    first_indices = np.concatenate([left for left, _right in batches])
+
+    assert np.any(first_indices < dimension // 3)
+    assert np.any(
+        (first_indices >= dimension // 3)
+        & (first_indices < 2 * dimension // 3)
+    )
+    assert np.any(first_indices >= 2 * dimension // 3)
+
+
+def test_default_sampling_detects_nonorthogonal_late_spectrum_pair():
+    dimension = 192
+    late_pair = next(
+        (int(first), int(second))
+        for left, right in validation_module.sample_pair_batches(
+            dimension,
+            sample_count=4096,
+            batch_size=17,
+        )
+        for first, second in zip(left, right)
+        if first >= 2 * dimension // 3
+    )
+    vectors = np.eye(dimension)
+    vectors[:, late_pair[1]] = vectors[:, late_pair[0]]
+
+    with pytest.raises(ValueError, match="orthonormal"):
+        validation_module.validate_orthonormal_columns(
+            vectors,
+            chunk_columns=17,
+            orthogonality_samples=4096,
+            tolerance=1e-12,
+            name="late-spectrum",
+        )
+
+
+def test_pair_sampling_stays_lazy_and_batch_bounded_for_huge_sample_count():
+    dimension = 1_000_000
+    total_pairs = dimension * (dimension - 1) // 2
+
+    tracemalloc.start()
+    batches = validation_module.sample_pair_batches(
+        dimension,
+        sample_count=total_pairs,
+        batch_size=23,
+    )
+    left, right = next(batches)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert left.shape == right.shape == (23,)
+    assert np.all(left != right)
+    assert peak < 1_000_000
+
+
 def test_degenerate_invariants_detect_same_diagonal_different_subspace():
     energies = np.asarray([0.0])
     reference = np.asarray([[1.0], [1.0]]) / np.sqrt(2.0)
@@ -406,6 +468,14 @@ def test_compute_observables_consumes_eigensystem_without_dense_solve(monkeypatc
     assert result["validation_metadata"]["chunk_columns"] == 3
     assert result["validation_metadata"]["residual_columns_checked"] == len(energies)
     assert result["validation_metadata"]["orthogonality_sample_count"] > 0
+    assert result["validation_metadata"]["orthogonality_sampling_policy"] == (
+        "midpoint-stratified first indices with SplitMix64 partner slots when "
+        "samples <= D-1; otherwise midpoint-stratified canonical pair ranks"
+    )
+    assert result["validation_metadata"]["orthogonality_pair_batch_size"] == 3
+    assert result["validation_metadata"]["orthogonality_pair_metadata_memory"] == (
+        "bounded by two int64 arrays of pair_batch_size"
+    )
 
 
 def test_compute_observables_rejects_nonhermitian_matrix():

@@ -11,6 +11,8 @@ import scipy.sparse as sp
 from pxp_ed import density_wave_state
 from turner2018_ed_engine import OrbitBasis, assemble_reduced_hamiltonian, canonical_dihedral
 from turner2018_ed_validation import (
+    ORTHOGONALITY_PAIR_MEMORY_POLICY,
+    ORTHOGONALITY_SAMPLING_POLICY,
     positive_integer,
     uint64_state,
     validate_eigenpair_residuals,
@@ -321,7 +323,7 @@ def compare_degenerate_invariants(
     tolerance: float = 1e-10,
     chunk_columns: int = 256,
     orthogonality_samples: int = 4096,
-) -> dict[str, float | int]:
+) -> dict[str, float | int | str]:
     """Compare complete eigenspaces using bounded two-way projector residuals."""
     chunk_columns = positive_integer(chunk_columns, "chunk_columns")
     orthogonality_samples = positive_integer(
@@ -461,6 +463,13 @@ def compare_degenerate_invariants(
             orthogonality_samples,
             vectors_ref.shape[1] * (vectors_ref.shape[1] - 1) // 2,
         ),
+        "orthogonality_sampling_policy": ORTHOGONALITY_SAMPLING_POLICY,
+        "orthogonality_pair_batch_size": min(
+            chunk_columns,
+            orthogonality_samples,
+            vectors_ref.shape[1] * (vectors_ref.shape[1] - 1) // 2,
+        ),
+        "orthogonality_pair_metadata_memory": ORTHOGONALITY_PAIR_MEMORY_POLICY,
     }
 
 
@@ -578,6 +587,15 @@ def compute_observables(
             "residual_columns_checked": reduced_dimension,
             "orthogonality_sample_count": validation[
                 "orthogonality_sample_count"
+            ],
+            "orthogonality_sampling_policy": validation[
+                "orthogonality_sampling_policy"
+            ],
+            "orthogonality_pair_batch_size": validation[
+                "orthogonality_pair_batch_size"
+            ],
+            "orthogonality_pair_metadata_memory": validation[
+                "orthogonality_pair_metadata_memory"
             ],
             "max_norm_error": validation["max_norm_error"],
             "max_sample_overlap": validation["max_sample_overlap"],
