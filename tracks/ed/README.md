@@ -182,21 +182,32 @@ The production path directly enumerates constrained states and constructs
 dihedral orbits; it never scans all `2**L` bitstrings. QuSpin is an optional
 small-system cross-check only and is not required by the native engine.
 
-The qdeshell profile records a distant queue estimate for `qdagnormal` and
-requires explicit user ratification before any real submission. Set
-`TURNER_LENGTH` to `28`, `30`, or `32`, then validate the request only; do not
-remove `--test-only`:
+The local SSH alias `qdeshell` targets Dzeshell; connection details remain only
+in the user's SSH configuration. The tracked profile records the live
+`dzagnormal` scheduler facts and shared project storage. Each immutable wrapper
+binds one length class to its exact CPU/GPU/memory request. Validate the
+appropriate request only; do not remove `--test-only`:
 
 ```bash
+# L=22, 24, 26, or 28: 8 CPUs, 1 GPU, 60000M
+export TURNER_LENGTH=28
+scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l22_28.sbatch
+
+# L=30: 16 CPUs, 2 GPUs, 120000M
+scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l30.sbatch
+
+# L=32: 32 CPUs, 4 GPUs, 240000M
 export TURNER_LENGTH=32
-scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_l32_qdagnormal.sbatch
+scripts/harness_slurm.sh --profile skills/using-slurm/profiles/qdeshell.toml submit --test-only --script scripts/turner2018_dzeshell_l32.sbatch
 ```
 
-The qdeshell job requests one node and task, 64 CPUs, 512 GB, 24 hours, and the
-partition-required `gpu:A800:1`. Set either `TURNER_OFFLINE_IMAGE` to a
-pre-staged Apptainer image or `TURNER_PYTHON` to a pre-staged offline Python
-environment. Set `TURNER_OUTPUT_DIR` under an allowed profile result root.
-Never embed credentials in the job file.
+All wrappers request one task for 24 hours and use the exact
+`gpu:NVIDIAA80080GBPCIeLC:<count>` GRES. The common runner defaults to the
+shared checkout `/work/share/giggleliu/jiangweiqi/quantum.harness`, its
+`.venv`, the offline CPython 3.12 runtime below the shared `python/` directory,
+and `/work/share/giggleliu/jiangweiqi/results/turner-l<L>`. It rejects a
+length/resource mismatch and a virtual environment built from another runtime.
+Never embed connection details or credentials in tracked files.
 
 For SCNet, first inspect the live queue configuration; no partition name is
 assumed:

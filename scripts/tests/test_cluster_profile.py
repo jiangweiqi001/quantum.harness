@@ -160,21 +160,29 @@ def test_public_qdeshell_profile_is_safe_and_complete():
     path = cp.Path(__file__).resolve().parents[2] / (
         "skills/using-slurm/profiles/qdeshell.toml"
     )
+    mirror_path = cp.Path(__file__).resolve().parents[2] / (
+        ".agents/skills/using-slurm/profiles/qdeshell.toml"
+    )
     profile = cp.load_profile(path)
 
     assert cp.validate(profile) == []
-    assert profile["connection"]["repo_path_remote"] == "~/quantum.harness"
+    assert mirror_path.read_bytes() == path.read_bytes()
+    assert profile["connection"]["repo_path_remote"] == (
+        "/work/share/giggleliu/jiangweiqi/quantum.harness"
+    )
     assert profile["connection"]["ssh"] == {"alias": "qdeshell"}
     assert profile["scheduler"] == {
         "type": "slurm",
-        "default_partition": "qdagnormal",
+        "default_partition": "dzagnormal",
     }
 
     partition = profile["partitions"][0]
-    assert partition["name"] == "qdagnormal"
-    assert partition["required_gres"] == "gpu:A800:1"
+    assert partition["name"] == "dzagnormal"
+    assert partition["required_gres"] == "gpu:NVIDIAA80080GBPCIeLC:1"
     assert partition["cores"] == 64
-    assert partition["gpu"] == "A800:8"
+    assert partition["memory"] == "515704M"
+    assert partition["gpu"] == "NVIDIAA80080GBPCIeLC:8"
+    assert partition["cpus_per_gpu"] == 8
 
     limits = cp.get_limits(profile)
     assert limits.hard == {
@@ -185,11 +193,15 @@ def test_public_qdeshell_profile_is_safe_and_complete():
     }
     assert limits.soft["warn_walltime"] == "08:00:00"
     assert limits.soft["warn_cpus"] == 16
-    assert limits.allowed_roots == ["~/quantum.harness/results", "~/scratch"]
+    assert limits.soft["unusual_partitions"] == ["dzagnormal"]
+    assert limits.allowed_roots == [
+        "/work/share/giggleliu/jiangweiqi/results",
+        "/work/share/giggleliu/jiangweiqi/quantum.harness/results",
+    ]
     assert profile["filesystem"] == {
         "home": "~",
-        "scratch": "~/scratch",
-        "project": "~/quantum.harness",
+        "scratch": "/work/share/giggleliu/jiangweiqi/results",
+        "project": "/work/share/giggleliu/jiangweiqi/quantum.harness",
         "quota": "",
     }
     assert profile["network"] == {
@@ -206,8 +218,8 @@ def test_public_qdeshell_profile_is_safe_and_complete():
         "key",
         "key_path",
         "identity_file",
-        "account",
-        "account_name",
+        "password",
+        "token",
     }
 
     def all_keys(value):
@@ -220,6 +232,9 @@ def test_public_qdeshell_profile_is_safe_and_complete():
                 yield from all_keys(child)
 
     assert forbidden_keys.isdisjoint(all_keys(profile))
+    raw = path.read_text(encoding="utf-8")
+    for forbidden_fragment in ("~/.ssh", "qdeshell_rsa", "windows", "private key"):
+        assert forbidden_fragment not in raw.lower()
 
 
 # --------------------------------------------------------------------------- #

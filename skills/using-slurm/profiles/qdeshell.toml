@@ -1,10 +1,10 @@
 [identity]
 name = "qdeshell"
-purpose = "QDES GPU compute service"
+purpose = "Dzeshell GPU compute service"
 maintainer = "QuantumBFS"
 
 [connection]
-repo_path_remote = "~/quantum.harness"
+repo_path_remote = "/work/share/giggleliu/jiangweiqi/quantum.harness"
 login_shell = false
 
 [connection.ssh]
@@ -12,21 +12,22 @@ alias = "qdeshell"
 
 [scheduler]
 type = "slurm"
-default_partition = "qdagnormal"
+default_partition = "dzagnormal"
 
 [[partitions]]
-name = "qdagnormal"
+name = "dzagnormal"
 class = "gpu"
 cores = 64
-memory = "2051791M"
-max_wall = "333-08:00:00"
-gpu = "A800:8"
-required_gres = "gpu:A800:1"
+memory = "515704M"
+max_wall = "24:00:00"
+gpu = "NVIDIAA80080GBPCIeLC:8"
+required_gres = "gpu:NVIDIAA80080GBPCIeLC:1"
+cpus_per_gpu = 8
 
 [filesystem]
 home = "~"
-scratch = "~/scratch"
-project = "~/quantum.harness"
+scratch = "/work/share/giggleliu/jiangweiqi/results"
+project = "/work/share/giggleliu/jiangweiqi/quantum.harness"
 quota = ""
 
 [network]
@@ -45,33 +46,23 @@ max_array_size = 200
 [limits.soft]
 warn_walltime = "08:00:00"
 warn_cpus = 16
-unusual_partitions = ["qdagnormal"]
+unusual_partitions = ["dzagnormal"]
 
 [limits.paths]
-allowed_roots = ["~/quantum.harness/results", "~/scratch"]
-
-[[documentation]]
-url = "https://www.hpccube.com/doc/1.0.6/11250/general-handbook/scheduler/intro.html"
-documents = "scheduler overview and login-node policy"
-
-[[documentation]]
-url = "https://www.hpccube.com/doc/1.0.6/11250/general-handbook/scheduler/sinfo.html"
-documents = "partition and node-state reference"
+allowed_roots = [
+  "/work/share/giggleliu/jiangweiqi/results",
+  "/work/share/giggleliu/jiangweiqi/quantum.harness/results",
+]
 
 [[gotchas]]
-symptom = "CPU-only jobs fail with QOSMinGRES"
-cause = "partition_qdagnormal requires one GPU per job"
-fix = "request --gres=gpu:A800:1 and validate the exact request with sbatch --test-only"
+symptom = "A request is rejected when CPU and GPU counts are not proportional"
+cause = "dzagnormal allocates eight CPUs per requested GPU"
+fix = "use a tracked size-class wrapper and validate it with sbatch --test-only"
 
 [[gotchas]]
-symptom = "A valid smoke request has a distant estimated start"
-cause = "the only visible A800 partition is heavily allocated"
-fix = "show the estimate and do not queue the real job without user ratification"
-
-[[gotchas]]
-symptom = "SSH commands print C.UTF-8 locale warnings"
-cause = "the remote image does not provide the forwarded C.UTF-8 locale"
-fix = "ignore the warning for parsing or configure a locale installed on the remote service"
+symptom = "A valid test-only request has a distant estimated start"
+cause = "the visible production partition has a long queue estimate"
+fix = "show the estimate and obtain explicit approval before any real submission"
 
 [commands]
 squeue = "squeue -u $USER"
@@ -80,4 +71,4 @@ sinfo = "sinfo -o '%P %a %.10l %.6D %.6t'"
 quota_command = "sacctmgr -n -P show assoc where user=$USER format=Account,Partition,QOS,GrpTRES,MaxTRES"
 
 [notes]
-text = "Live probe found Anaconda, Apptainer, and Singularity modules. Compute-node internet is fail-closed false until a scheduled probe verifies it."
+text = "Login and compute nodes are offline. Use only the shared CPython 3.12 runtime, repository virtual environment, and results roots."

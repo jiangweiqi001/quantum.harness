@@ -1103,28 +1103,135 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
 
 
 class TurnerL32SlurmTests(unittest.TestCase):
-    def test_qdagnormal_script_has_exact_required_resources_and_no_secrets(self):
-        text = (SCRIPTS / "turner2018_l32_qdagnormal.sbatch").read_text()
+    DZESHELL_CLASSES = {
+        "turner2018_dzeshell_l22_28.sbatch": {
+            "lengths": "22|24|26|28",
+            "cpus": 8,
+            "gpus": 1,
+            "memory": "60000M",
+        },
+        "turner2018_dzeshell_l30.sbatch": {
+            "lengths": "30",
+            "cpus": 16,
+            "gpus": 2,
+            "memory": "120000M",
+        },
+        "turner2018_dzeshell_l32.sbatch": {
+            "lengths": "32",
+            "cpus": 32,
+            "gpus": 4,
+            "memory": "240000M",
+        },
+    }
 
-        for directive in (
-            "#SBATCH --partition=qdagnormal",
-            "#SBATCH --nodes=1",
-            "#SBATCH --ntasks=1",
-            "#SBATCH --cpus-per-task=64",
-            "#SBATCH --mem=512G",
-            "#SBATCH --time=24:00:00",
-            "#SBATCH --gres=gpu:A800:1",
-        ):
-            self.assertIn(directive, text)
-        self.assertIn("OPENBLAS_NUM_THREADS=\"$SLURM_CPUS_PER_TASK\"", text)
-        self.assertIn("MKL_NUM_THREADS=\"$SLURM_CPUS_PER_TASK\"", text)
-        self.assertIn("TURNER_LENGTH", text)
-        self.assertRegex(text, r"28\|30\|32")
+    def test_dzeshell_wrappers_have_immutable_length_resource_classes(self):
+        self.assertFalse((SCRIPTS / "turner2018_l32_qdagnormal.sbatch").exists())
+        for name, expected in self.DZESHELL_CLASSES.items():
+            with self.subTest(name=name):
+                text = (SCRIPTS / name).read_text()
+                for directive in (
+                    "#SBATCH --partition=dzagnormal",
+                    "#SBATCH --nodes=1",
+                    "#SBATCH --ntasks=1",
+                    f"#SBATCH --cpus-per-task={expected['cpus']}",
+                    f"#SBATCH --mem={expected['memory']}",
+                    "#SBATCH --time=24:00:00",
+                    (
+                        "#SBATCH --gres=gpu:NVIDIAA80080GBPCIeLC:"
+                        f"{expected['gpus']}"
+                    ),
+                ):
+                    self.assertIn(directive, text)
+                self.assertIn(
+                    f'TURNER_ALLOWED_LENGTHS="{expected["lengths"]}"', text
+                )
+                self.assertIn('source "$SCRIPT_DIR/turner2018_dzeshell_run.sh"', text)
+                self.assertNotIn("turner2018_l32_server.py", text)
+                self.assertNotRegex(
+                    text, r"(?i)(password|api[_-]?key|access[_-]?token)\s*="
+                )
+
+    def test_dzeshell_common_runner_uses_shared_offline_paths(self):
+        text = (SCRIPTS / "turner2018_dzeshell_run.sh").read_text()
+        root = "/work/share/giggleliu/jiangweiqi"
+        self.assertIn(f'TURNER_SHARED_ROOT="${{TURNER_SHARED_ROOT:-{root}}}"', text)
+        self.assertIn(
+            'TURNER_REPO="${TURNER_REPO:-$TURNER_SHARED_ROOT/quantum.harness}"',
+            text,
+        )
+        self.assertIn(
+            'TURNER_RUNTIME="${TURNER_RUNTIME:-$TURNER_SHARED_ROOT/python/cpython-3.12}"',
+            text,
+        )
+        self.assertIn(
+            'TURNER_OUTPUT_DIR="${TURNER_OUTPUT_DIR:-$TURNER_SHARED_ROOT/results/turner-l${TURNER_LENGTH}}"',
+            text,
+        )
+        self.assertIn(
+            'TURNER_PYTHON="${TURNER_PYTHON:-$TURNER_REPO/.venv/bin/python}"',
+            text,
+        )
         self.assertIn("--stage all", text.replace("\n", " "))
         self.assertNotIn("--declared-memory", text)
-        self.assertIn("TURNER_OFFLINE_IMAGE", text)
-        self.assertIn("TURNER_OUTPUT_DIR", text)
-        self.assertNotRegex(text, r"(?i)(password|api[_-]?key|access[_-]?token)\s*=")
+        self.assertIn('OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"', text)
+
+    def test_dzeshell_common_runner_rejects_unsupported_lengths_and_bad_resources(self):
+        runner = SCRIPTS / "turner2018_dzeshell_run.sh"
+        base = {
+            **os.environ,
+            "TURNER_ALLOWED_LENGTHS": "30",
+            "TURNER_LENGTH": "28",
+            "SLURM_CPUS_PER_TASK": "16",
+            "SLURM_MEM_PER_NODE": "120000M",
+            "SLURM_GPUS_ON_NODE": "2",
+        }
+        unsupported = subprocess.run(
+            ["bash", str(runner)], env=base, text=True, capture_output=True
+        )
+        self.assertEqual(unsupported.returncode, 2)
+        self.assertIn("not allowed", unsupported.stderr)
+
+        for key, value in (
+            ("SLURM_CPUS_PER_TASK", "8"),
+            ("SLURM_MEM_PER_NODE", "60000M"),
+            ("SLURM_GPUS_ON_NODE", "1"),
+        ):
+            with self.subTest(key=key):
+                environment = {
+                    **base,
+                    "TURNER_LENGTH": "30",
+                    key: value,
+                }
+                result = subprocess.run(
+                    ["bash", str(runner)],
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(key, result.stderr)
+
+    def test_dzeshell_common_runner_requires_scheduler_environment(self):
+        runner = SCRIPTS / "turner2018_dzeshell_run.sh"
+        environment = {
+            **os.environ,
+            "TURNER_ALLOWED_LENGTHS": "32",
+            "TURNER_LENGTH": "32",
+        }
+        for key in (
+            "SLURM_CPUS_PER_TASK",
+            "SLURM_MEM_PER_NODE",
+            "SLURM_GPUS_ON_NODE",
+        ):
+            environment.pop(key, None)
+        result = subprocess.run(
+            ["bash", str(runner)],
+            env=environment,
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SLURM_CPUS_PER_TASK", result.stderr)
 
     def test_scnet_script_is_provider_neutral_and_cpu_only_by_default(self):
         text = (SCRIPTS / "turner2018_l32_scnet.sbatch").read_text()
@@ -1147,16 +1254,16 @@ class TurnerL32SlurmTests(unittest.TestCase):
 
     def test_documented_submission_is_test_only(self):
         text = (REPO / "tracks" / "ed" / "README.md").read_text()
-        expected = (
-            "scripts/harness_slurm.sh --profile "
-            "skills/using-slurm/profiles/qdeshell.toml submit --test-only "
-            "--script scripts/turner2018_l32_qdagnormal.sbatch"
-        )
-        self.assertIn(expected, text)
-        self.assertNotIn(
-            "submit --script scripts/turner2018_l32_qdagnormal.sbatch",
-            text,
-        )
+        for script in self.DZESHELL_CLASSES:
+            expected = (
+                "scripts/harness_slurm.sh --profile "
+                "skills/using-slurm/profiles/qdeshell.toml submit --test-only "
+                f"--script scripts/{script}"
+            )
+            self.assertIn(expected, text)
+            self.assertNotIn(f"submit --script scripts/{script}", text)
+        self.assertNotIn("turner2018_l32_qdagnormal.sbatch", text)
+        self.assertNotIn("qdagnormal", text)
         self.assertIn('sinfo -o "%P %c %m %G %l %a"', text)
         self.assertIn("scontrol show partition", text)
         self.assertIn("turner2018_l32_scnet.sbatch", text)
