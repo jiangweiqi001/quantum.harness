@@ -5,6 +5,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import h5py
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
@@ -418,7 +419,7 @@ def test_independent_renderer_uses_independent_spectra_for_all_generated_metrics
         official_data_dir=tmp_path / "official",
     )
 
-    overview = paths["figure_all"]
+    overview = paths["figure_paper"]
     with np.load(overview.with_suffix(".npz"), allow_pickle=False) as arrays:
         np.testing.assert_array_equal(
             arrays["L28_histogram_counts"],
@@ -456,6 +457,155 @@ def test_independent_renderer_uses_independent_spectra_for_all_generated_metrics
     )
 
 
+def test_independent_renderer_separates_paper_and_supplemental_scopes(
+    tmp_path, monkeypatch
+):
+    lengths = [22, 24, 26, 28, 30, 32]
+    energies = np.linspace(-4.0, 3.0, 4000) ** 3
+    energies.sort()
+    statistics = paper_exact_level_statistics(energies)
+    official_xy = np.column_stack(
+        (
+            np.r_[0.0, PAPER_HISTOGRAM_CENTERS],
+            np.r_[0.0, statistics["histogram_density"]],
+        )
+    )
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {
+            length: _synthetic_independent(length, energies) for length in lengths
+        },
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {
+            length: {
+                "xy": official_xy,
+                "provenance": {"member": f"xydataL{length}.dat"},
+            }
+            for length in (28, 30, 32)
+        },
+    )
+    captured_labels = {}
+    original_write = fig4._write_figure_generation_partials
+
+    def inspect_aggregate(path, figure, arrays, metrics, generation_id, partials):
+        captured_labels[path.name] = [
+            line.get_label() for line in figure.axes[0].get_lines()
+        ]
+        return original_write(
+            path, figure, arrays, metrics, generation_id, partials
+        )
+
+    monkeypatch.setattr(
+        fig4, "_write_figure_generation_partials", inspect_aggregate
+    )
+
+    paths = fig4.render_independent_fig4(
+        tmp_path / "independent",
+        output_dir=tmp_path / "figure",
+        official_data_dir=tmp_path / "official",
+    )
+
+    paper = paths["figure_paper"]
+    supplemental = paths["figure_supplemental"]
+    assert paper.name == "fig4_paper_comparison.png"
+    assert supplemental.name == "fig4_supplemental_L22-L32.png"
+    paper_metrics = json.loads(paper.with_suffix(".json").read_text())
+    assert paper_metrics["available_independent_lengths"] == [28, 30, 32]
+    assert paper_metrics["layout"] == {
+        "kind": "paper-comparison",
+        "lengths": [28, 30, 32],
+    }
+    assert set(paper_metrics["lengths"]) == {"28", "30", "32"}
+    assert set(paper_metrics["official_data"]["overlays"]) == {"28", "30", "32"}
+    with np.load(paper.with_suffix(".npz"), allow_pickle=False) as arrays:
+        assert all(
+            name == "generation_id"
+            or name.startswith(("L28_", "L30_", "L32_"))
+            for name in arrays.files
+        )
+        assert any(name.startswith("L28_official_") for name in arrays.files)
+        assert any(name.startswith("L30_official_") for name in arrays.files)
+        assert any(name.startswith("L32_official_") for name in arrays.files)
+    paper_labels = captured_labels[paper.name]
+    for length in (28, 30, 32):
+        assert f"L={length}" in paper_labels
+        assert f"L={length} official" in paper_labels
+    assert {"P", "SP", "WD"}.issubset(paper_labels)
+    assert all("L=22" not in label for label in paper_labels)
+    assert all("L=24" not in label for label in paper_labels)
+    assert all("L=26" not in label for label in paper_labels)
+
+    supplemental_metrics = json.loads(
+        supplemental.with_suffix(".json").read_text()
+    )
+    assert supplemental_metrics["available_independent_lengths"] == lengths
+    assert supplemental_metrics["layout"] == {
+        "kind": "supplemental-finite-size",
+        "lengths": lengths,
+    }
+    assert set(supplemental_metrics["lengths"]) == {
+        "22",
+        "24",
+        "26",
+        "28",
+        "30",
+        "32",
+    }
+    with np.load(supplemental.with_suffix(".npz"), allow_pickle=False) as arrays:
+        for length in lengths:
+            assert f"L{length}_source" in arrays.files
+
+
+def test_independent_renderer_migrates_complete_legacy_single_size_outputs(
+    tmp_path, monkeypatch
+):
+    energies = np.linspace(-4.0, 3.0, 4000) ** 3
+    energies.sort()
+    monkeypatch.setattr(
+        fig4,
+        "load_independent_fig4_results",
+        lambda _root: {28: _synthetic_independent(28, energies)},
+    )
+    monkeypatch.setattr(
+        fig4,
+        "_load_available_official_histograms",
+        lambda _root, _lengths: {},
+    )
+    output = tmp_path / "figure"
+    initial = fig4.render_independent_fig4(
+        tmp_path / "independent",
+        output_dir=output,
+        official_data_dir=None,
+    )
+    for key in ("figure_paper", "figure_supplemental"):
+        path = initial[key]
+        path.unlink()
+        path.with_suffix(".npz").unlink()
+        path.with_suffix(".json").unlink()
+    single = initial["figure_L28"]
+    assert all(
+        path.is_file()
+        for path in (single, single.with_suffix(".npz"), single.with_suffix(".json"))
+    )
+
+    migrated = fig4.render_independent_fig4(
+        tmp_path / "independent",
+        output_dir=output,
+        official_data_dir=None,
+    )
+
+    for key in ("figure_paper", "figure_supplemental", "figure_L28"):
+        path = migrated[key]
+        assert all(
+            item.is_file()
+            for item in (path, path.with_suffix(".npz"), path.with_suffix(".json"))
+        )
+
+
 def test_independent_renderer_records_missing_sizes_and_small_exact_window(
     tmp_path, monkeypatch
 ):
@@ -482,8 +632,10 @@ def test_independent_renderer_records_missing_sizes_and_small_exact_window(
         official_data_dir=None,
     )
 
-    assert set(paths) == {"figure_all", "figure_L20", "figure_L24"}
-    metrics = json.loads(paths["figure_all"].with_suffix(".json").read_text())
+    assert set(paths) == {"figure_supplemental", "figure_L20", "figure_L24"}
+    metrics = json.loads(
+        paths["figure_supplemental"].with_suffix(".json").read_text()
+    )
     assert metrics["available_independent_lengths"] == [20, 24]
     assert metrics["missing_lengths_within_independent_range"] == [22]
     assert metrics["lengths"]["20"]["statistics_available"] is False
@@ -607,7 +759,7 @@ def test_independent_generation_publish_failure_restores_previous_triplet(
         output_dir=output,
         official_data_dir=None,
     )
-    target = paths["figure_all"]
+    target = paths["figure_paper"]
     triplet = (target, target.with_suffix(".npz"), target.with_suffix(".json"))
     before = {path: path.read_bytes() for path in triplet}
     original_replace = fig4.os.replace
@@ -647,7 +799,7 @@ def test_independent_first_generation_partial_failure_leaves_no_triplet(
         lambda _root, _lengths: {},
     )
     output = tmp_path / "figure"
-    expected = output / "fig4_independent_all.png"
+    expected = output / "fig4_paper_comparison.png"
 
     def fail_partial(partial, _payload):
         with partial.open("wb") as handle:
@@ -694,7 +846,7 @@ def test_independent_partial_creation_and_fsync_failures_are_cleaned(
         lambda _root, _lengths: {},
     )
     output = tmp_path / "figure"
-    png = output / "fig4_independent_all.png"
+    png = output / "fig4_paper_comparison.png"
     targets = {
         "png": png,
         "npz": png.with_suffix(".npz"),
@@ -757,7 +909,7 @@ def test_independent_generation_backup_failure_preserves_previous_triplet(
         output_dir=output,
         official_data_dir=None,
     )
-    target = paths["figure_all"]
+    target = paths["figure_paper"]
     triplet = (target, target.with_suffix(".npz"), target.with_suffix(".json"))
     before = {path: path.read_bytes() for path in triplet}
     original_link = fig4.os.link
@@ -951,7 +1103,12 @@ def test_later_size_failure_rolls_back_entire_fig4_output_set(
         lambda _root, _lengths: {},
     )
     output = tmp_path / "figure"
-    stems = ("fig4_independent_all", "fig4_independent_L28", "fig4_independent_L30")
+    stems = (
+        "fig4_paper_comparison",
+        "fig4_supplemental_L22-L32",
+        "fig4_independent_L28",
+        "fig4_independent_L30",
+    )
     targets = tuple(
         output / f"{stem}.{suffix}"
         for stem in stems
@@ -1037,3 +1194,75 @@ def test_l20_acceptance_is_explicitly_provenance_only(tmp_path, monkeypatch):
     assert length["resolved_window_bounds"] == [91, 182]
     assert length["histogram_acceptance"]["passed"] is False
     assert length["provenance_acceptance"]["passed"] is True
+
+
+def test_mixed_size_acceptance_requires_statistics_only_for_paper_sizes():
+    available = {"histogram": np.array([1.0])}
+    acceptance = fig4._acceptance_for_lengths(
+        [22, 24, 26, 28, 30, 32],
+        {
+            22: None,
+            24: available,
+            26: available,
+            28: available,
+            30: available,
+            32: available,
+        },
+    )
+
+    assert acceptance["passed"] is True
+    assert acceptance["statistics_passed"] is True
+    assert acceptance["statistics_required"] is True
+
+
+def test_independent_and_official_histograms_render_as_paper_style_curves():
+    figure, axis = plt.subplots()
+    statistics = {
+        "histogram_centers": np.array([0.1, 0.3, 0.5]),
+        "histogram_density": np.array([0.2, 0.6, 0.4]),
+    }
+    official = np.array(
+        [[0.0, 0.0], [0.1, 0.1], [0.3, 0.5], [0.5, 0.3]]
+    )
+
+    fig4._plot_independent_length(
+        axis,
+        length=32,
+        statistics=statistics,
+        official_xy=official,
+        color="black",
+    )
+
+    generated, source = axis.lines
+    assert generated.get_drawstyle() == "default"
+    assert generated.get_linestyle() == "-"
+    assert len(generated.get_xdata()) > len(statistics["histogram_centers"])
+    assert np.all(np.diff(generated.get_xdata()) > 0)
+    assert source.get_drawstyle() == "default"
+    assert source.get_linestyle() == "--"
+    assert len(source.get_xdata()) > len(official) - 1
+    assert np.all(np.diff(source.get_xdata()) > 0)
+    fig4._finish_independent_axis(axis, "")
+    assert axis.get_xlim() == pytest.approx((0.0, 5.0))
+    np.testing.assert_array_equal(axis.get_xticks(), np.arange(6))
+    assert axis.get_ylim() == pytest.approx((0.0, 1.05))
+    np.testing.assert_allclose(axis.get_yticks(), np.arange(0.0, 1.01, 0.2))
+    assert axis.get_xlabel() == r"$s$"
+    assert axis.get_ylabel() == r"$P(s)$"
+    plt.close(figure)
+
+
+def test_density_of_states_inset_uses_original_paper_axes():
+    figure, axis = plt.subplots()
+    energies = np.linspace(-19.0, 19.0, 1001)
+
+    inset = fig4._plot_density_of_states_inset(axis, energies)
+
+    assert inset.get_xlim() == pytest.approx((-20.0, 20.0))
+    np.testing.assert_array_equal(inset.get_xticks(), [-20, -10, 0, 10, 20])
+    assert inset.get_ylim() == pytest.approx((0.0, 0.12))
+    np.testing.assert_array_equal(inset.get_yticks(), [0.0, 0.1])
+    assert inset.get_xlabel() == "$E$"
+    assert inset.get_ylabel() == r"$\rho(E)$"
+    assert len(inset.lines[0].get_xdata()) > 100
+    plt.close(figure)

@@ -29,7 +29,11 @@ from turner2018_ed_engine import (
     build_orbit_basis,
 )
 from turner2018_ed_observables import compute_observables, compute_observables_from_h5
-from turner2018_ed_solver import estimate_dense_resources, solve_full_eigensystem
+from turner2018_ed_solver import (
+    estimate_dense_resources,
+    lapack_driver_for_dimension,
+    solve_full_eigensystem,
+)
 
 L32_FULL_DIMENSION = 4_870_847
 L32_SECTOR_DIMENSION = 77_436
@@ -457,7 +461,11 @@ def build_plan(length: int, output_dir: Path, argv: list[str]) -> dict[str, Any]
             "dense_dtype": "float64",
             "dense_order": "Fortran",
             "routine": "scipy.linalg.eigh",
-            "driver": "evd",
+            "driver": (
+                lapack_driver_for_dimension(dimension, vectors=True)
+                if dimension is not None
+                else "evd"
+            ),
             "overwrite_a": True,
             "check_finite": False,
         },
@@ -894,15 +902,27 @@ def _validate_fig3_shell_selection(
     failure = "Fig. 3 shell selection metadata is invalid"
     if metrics.get("primary_length") != length:
         raise RuntimeError(f"{failure}: stale primary length")
-    expected_plot_convention = {
-        "exact": "black circles, solid line",
-        "fsa": "red crosses, dashed line",
-        "x": "folded FSA shell index n=0..L/2",
-        "y": "squared shell weight, linear",
+    expected_plot_conventions = {
+        "b": {
+            "exact": "black circles, solid line",
+            "fsa": "red circles, solid line",
+            "x": "full shell index n=0..L",
+            "displayed_points": "L+1",
+            "stored_independent_points": "L/2+1",
+            "y": "(L/2)*squared shell weight, linear, range 0..4.2, ticks 0,2,4",
+        },
+        "c": {
+            "exact": "black circles, solid line",
+            "fsa": "red circles, solid line",
+            "x": "full shell index n=0..L",
+            "displayed_points": "L+1",
+            "stored_independent_points": "L/2+1",
+            "y": "(L/2)*squared shell weight, linear, range 0..2.1, ticks 0,1,2",
+        },
     }
     conventions = metrics.get("plot_conventions", {})
     if any(
-        conventions.get(f"panel_{panel}") != expected_plot_convention
+        conventions.get(f"panel_{panel}") != expected_plot_conventions[panel]
         for panel in ("b", "c")
     ):
         raise RuntimeError(f"{failure}: plot conventions")
@@ -913,8 +933,12 @@ def _validate_fig3_shell_selection(
         "b": "lowest-matched-scar",
         "c": "negative-adjacent-to-zero",
     }
-    plotted_count = length // 2 + 1
-    folding = "k=0 inversion-even: n and L-n are symmetry-related"
+    stored_count = length // 2 + 1
+    displayed_count = length + 1
+    folding = (
+        "normalized inversion-even amplitudes unfolded as "
+        "(|n>+|L-n>)/sqrt(2), with n=L/2 unchanged"
+    )
     selected_by_panel: dict[str, dict[str, Any]] = {}
     for record in selected:
         if not isinstance(record, dict):
@@ -926,7 +950,9 @@ def _validate_fig3_shell_selection(
         if (
             record.get("role") != expected_roles[panel]
             or record.get("full_fsa_shell_count") != length + 1
-            or record.get("plotted_folded_shell_count") != plotted_count
+            or record.get("plotted_folded_shell_count") != stored_count
+            or record.get("displayed_full_shell_count") != displayed_count
+            or record.get("vertical_scale_factor") != length / 2
             or record.get("folding") != folding
         ):
             raise RuntimeError(f"{failure}: role or shell counts")
@@ -938,7 +964,7 @@ def _validate_fig3_shell_selection(
             for field in integer_fields
         ):
             raise RuntimeError(f"{failure}: selected indices")
-        if record["fsa_index"] >= plotted_count:
+        if record["fsa_index"] >= stored_count:
             raise RuntimeError(f"{failure}: FSA index exceeds shell count")
         numeric_fields = (
             "exact_energy",
@@ -976,10 +1002,10 @@ def _validate_fig3_shell_selection(
         except KeyError as error:
             raise RuntimeError(f"{failure}: missing plotted arrays") from error
         if (
-            shell.shape != (plotted_count,)
-            or exact_weights.shape != (plotted_count,)
-            or fsa_weights.shape != (plotted_count,)
-            or not np.array_equal(shell, np.arange(plotted_count))
+            shell.shape != (displayed_count,)
+            or exact_weights.shape != (displayed_count,)
+            or fsa_weights.shape != (displayed_count,)
+            or not np.array_equal(shell, np.arange(displayed_count))
             or not np.all(np.isfinite(exact_weights))
             or not np.all(np.isfinite(fsa_weights))
             or np.any(exact_weights < 0)
@@ -987,12 +1013,12 @@ def _validate_fig3_shell_selection(
         ):
             raise RuntimeError(f"{failure}: plotted shell arrays")
         if not np.isclose(
-            np.sum(exact_weights),
+            np.sum(exact_weights) / record["vertical_scale_factor"],
             record["exact_weight_sum"],
             atol=1e-12,
             rtol=1e-10,
         ) or not np.isclose(
-            np.sum(fsa_weights),
+            np.sum(fsa_weights) / record["vertical_scale_factor"],
             record["fsa_weight_sum"],
             atol=1e-12,
             rtol=1e-10,
@@ -1007,7 +1033,8 @@ def _validate_fig3_shell_selection(
     fsa = per_length.get("fsa", {})
     if (
         fsa.get("full_fsa_shell_count") != length + 1
-        or fsa.get("plotted_folded_shell_count") != plotted_count
+        or fsa.get("plotted_folded_shell_count") != stored_count
+        or fsa.get("displayed_full_shell_count") != displayed_count
         or fsa.get("folding") != folding
         or fsa.get("selected_states") != selected
     ):
@@ -1052,7 +1079,7 @@ def _validate_fig3_shell_selection(
         raise RuntimeError(f"{failure}: source evidence hash mismatch")
     if (
         fsa.get("match_exact_indices") != tower.tolist()
-        or fsa.get("match_fsa_indices") != list(range(plotted_count))
+        or fsa.get("match_fsa_indices") != list(range(stored_count))
         or fsa.get("shell_dimensions") != list(amplitudes.shape)
     ):
         raise RuntimeError(f"{failure}: source indices or dimensions mismatch")
@@ -1068,7 +1095,7 @@ def _validate_fig3_shell_selection(
             np.asarray(fsa.get("fsa_energies")),
         )
         or not np.array_equal(
-            projection[tower, np.arange(plotted_count)],
+            projection[tower, np.arange(stored_count)],
             np.asarray(fsa.get("match_strengths")),
         )
     ):
@@ -1085,7 +1112,7 @@ def _validate_fig3_shell_selection(
             energies=energies,
             exact_shell_amplitudes=amplitudes,
             fsa_hamiltonian_sector=hamiltonian,
-            matched_tower={"tower": tower},
+            matched_tower=upstream["selector"],
             zero_tolerance=1e-10,
             fsa_gap_tolerance=FSA_EIGENVALUE_GAP_TOLERANCE,
         )

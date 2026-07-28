@@ -45,16 +45,32 @@ fi
 readonly TURNER_SHARED_ROOT="/public/home/student090"
 TURNER_REPO="${TURNER_REPO:-$TURNER_SHARED_ROOT/quantum.harness}"
 TURNER_RUNTIME="${TURNER_RUNTIME:-$TURNER_SHARED_ROOT/python/cpython-3.12}"
-TURNER_OUTPUT_DIR="${TURNER_OUTPUT_DIR:-$TURNER_SHARED_ROOT/results/fig2-itebd}"
+readonly TURNER_DT005_OUTPUT_DIR="$TURNER_SHARED_ROOT/results/fig2-itebd"
+readonly TURNER_DT0025_OUTPUT_DIR="$TURNER_SHARED_ROOT/results/fig2-itebd-dt0025"
+TURNER_OUTPUT_DIR="${TURNER_OUTPUT_DIR:-$TURNER_DT005_OUTPUT_DIR}"
 TURNER_PYTHON="${TURNER_PYTHON:-$TURNER_REPO/.venv-itebd/bin/python}"
 TURNER_OFFICIAL_DATA="${TURNER_OFFICIAL_DATA:-$TURNER_REPO/.external/official-data/turner-2018}"
 TURNER_ITEBD_TARGET_TIME="${TURNER_ITEBD_TARGET_TIME:-30.0}"
+TURNER_ITEBD_DT="${TURNER_ITEBD_DT:-0.05}"
 SLURM_SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$TURNER_REPO}"
 
 if [[ "$TURNER_ITEBD_TARGET_TIME" != 30 && "$TURNER_ITEBD_TARGET_TIME" != 30.0 ]]; then
   echo "TURNER_ITEBD_TARGET_TIME must be 30.0" >&2
   exit 2
 fi
+case "$TURNER_ITEBD_DT" in
+  0.05) ;;
+  0.025)
+    if [[ "$TURNER_OUTPUT_DIR" == "$TURNER_DT005_OUTPUT_DIR" ]]; then
+      echo "dt=0.025 requires a distinct TURNER_OUTPUT_DIR (for example $TURNER_DT0025_OUTPUT_DIR)" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "TURNER_ITEBD_DT must be 0.05 or 0.025" >&2
+    exit 2
+    ;;
+esac
 
 approved_root="$(realpath -m -- "$TURNER_SHARED_ROOT")"
 require_approved_path() {
@@ -133,7 +149,7 @@ cd "$TURNER_REPO"
 exec "$TURNER_PYTHON" -u scripts/turner2018_fig2_itebd.py \
   --state "$TURNER_ITEBD_STATE" \
   --target-time "$TURNER_ITEBD_TARGET_TIME" \
-  --dt 0.05 \
+  --dt "$TURNER_ITEBD_DT" \
   --chi-max 400 \
   --sample-dt 0.1 \
   --checkpoint-dt 1.0 \

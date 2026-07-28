@@ -164,6 +164,31 @@ def test_evolution_rejects_nonfinite_state_tensor():
         evolve_imps(psi, ITEBDConfig(), start_time=0.0, target_time=0.0)
 
 
+def test_evolution_accepts_small_numerical_blockade_leakage(monkeypatch):
+    config = ITEBDConfig()
+    psi = build_imps("vacuum", config)
+    sample = replace(
+        measure_sample(psi, 0.0, 0.0, 0.0),
+        blockade_violation=2e-6,
+    )
+    monkeypatch.setattr(pxp_itebd, "measure_sample", lambda *args: sample)
+
+    assert evolve_imps(psi, config, start_time=0.0, target_time=0.0) == [sample]
+
+
+def test_evolution_rejects_blockade_leakage_above_relaxed_limit(monkeypatch):
+    config = ITEBDConfig()
+    psi = build_imps("vacuum", config)
+    sample = replace(
+        measure_sample(psi, 0.0, 0.0, 0.0),
+        blockade_violation=2e-5,
+    )
+    monkeypatch.setattr(pxp_itebd, "measure_sample", lambda *args: sample)
+
+    with pytest.raises(RuntimeError, match="blockade violation exceeds 1e-5"):
+        evolve_imps(psi, config, start_time=0.0, target_time=0.0)
+
+
 def test_evolution_rejects_blockade_violation():
     config = ITEBDConfig()
     sites = build_imps("vacuum", config).sites
@@ -173,7 +198,7 @@ def test_evolution_rejects_blockade_violation():
         bc="infinite",
     )
 
-    with pytest.raises(RuntimeError, match="blockade violation exceeds 1e-8"):
+    with pytest.raises(RuntimeError, match="blockade violation exceeds 1e-5"):
         evolve_imps(violating, config, start_time=0.0, target_time=0.0)
 
 

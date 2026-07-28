@@ -25,6 +25,19 @@ class DenseResourceEstimate:
     minimum_requested_bytes: int
 
 
+def lapack_driver_for_dimension(dimension: int, *, vectors: bool) -> str:
+    """Choose a full-spectrum driver that is safe with LP64 LAPACK integers."""
+    dimension = positive_integer(dimension, "dimension")
+    if not vectors:
+        return "evd"
+
+    # DSYEVD with eigenvectors requires LWORK >= 1 + 6*N + 2*N**2.
+    # LP64 LAPACK exposes LWORK as a signed 32-bit integer; use DSYEVR once
+    # that workspace length can no longer be represented.
+    evd_lwork = 1 + 6 * dimension + 2 * dimension * dimension
+    return "evd" if evd_lwork <= np.iinfo(np.int32).max else "evr"
+
+
 def estimate_dense_resources(dimension: int, *, vectors: bool) -> DenseResourceEstimate:
     """Estimate dense memory requirements for one full solve."""
     if dimension < 1:
@@ -84,10 +97,11 @@ def solve_full_eigensystem(
     if dense.dtype != np.float64 or not dense.flags.f_contiguous:
         raise RuntimeError("dense conversion must produce Fortran-contiguous float64")
 
+    driver = lapack_driver_for_dimension(matrix.shape[0], vectors=vectors)
     if vectors:
         energies, eigenvectors = scipy.linalg.eigh(
             dense,
-            driver="evd",
+            driver=driver,
             overwrite_a=True,
             check_finite=False,
         )
@@ -115,7 +129,7 @@ def solve_full_eigensystem(
 
     energies = scipy.linalg.eigvalsh(
         dense,
-        driver="evd",
+        driver=driver,
         overwrite_a=True,
         check_finite=False,
     )

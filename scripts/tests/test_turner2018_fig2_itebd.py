@@ -1,17 +1,15 @@
 import hashlib
 import json
-from pathlib import Path
 import re
+from pathlib import Path
 from zipfile import ZipFile
 
 import h5py
-from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
-from scipy.sparse.linalg import expm_multiply
-
 import turner2018_fig2_itebd
+from matplotlib.axes import Axes
 from pxp_ed import (
     basis_state_vector,
     constrained_basis,
@@ -25,9 +23,9 @@ from pxp_itebd import (
     evolve_imps,
     load_checkpoint,
 )
+from scipy.sparse.linalg import expm_multiply
 from turner2018_fig2 import evolve_observables, half_chain_entropy
 from turner2018_fig2_itebd import render_figures, run_state
-
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -341,11 +339,15 @@ def test_render_figures_selects_state_specific_entropy_cuts(tmp_path, monkeypatc
         official_dir,
         tmp_path,
         fit_window=(0.0, 3.0),
+        x_limit=22.0,
     )
 
     figures = [plt.figure(number) for number in plt.get_fignums()]
     paper_figure = next(figure for figure in figures if len(figure.axes) == 3)
     assert paper_figure.axes[0].get_ylabel() == "entropy at state-specific cut"
+    np.testing.assert_array_equal(
+        paper_figure.axes[-1].get_xticks(), [0.0, 5.0, 10.0, 15.0, 20.0]
+    )
     for state in states:
         line = next(
             line
@@ -976,14 +978,17 @@ def test_lasg02_itebd_runner_resumes_exact_chi400_configuration():
         (REPO / "scripts" / "turner2018_itebd_runtime_manifest.json").read_text()
     )
     assert 'TURNER_ITEBD_TARGET_TIME="${TURNER_ITEBD_TARGET_TIME:-30.0}"' in runner
+    assert 'TURNER_ITEBD_DT="${TURNER_ITEBD_DT:-0.05}"' in runner
     assert '.venv-itebd/bin/python}"' in runner
     assert "--state \"$TURNER_ITEBD_STATE\"" in runner
     assert '--target-time "$TURNER_ITEBD_TARGET_TIME"' in runner
-    assert "--dt 0.05" in runner
+    assert '--dt "$TURNER_ITEBD_DT"' in runner
     assert "--chi-max 400" in runner
     assert "--sample-dt 0.1" in runner
     assert "--checkpoint-dt 1.0" in runner
     assert "--resume" in runner
+    assert "fig2-itebd-dt0025" in runner
+    assert "dt=0.025 requires a distinct TURNER_OUTPUT_DIR" in runner
     assert "turner2018_wheelhouse.py" in runner
     assert "turner2018_itebd_runtime_manifest.json" in runner
     assert "--check-runtime" in runner
@@ -995,3 +1000,10 @@ def test_lasg02_itebd_runner_resumes_exact_chi400_configuration():
         manifest["source_build"]["built_wheel_sha256"]
         == "83318765b72ab05088b89d7d0977dd86b699c5dc2db6e1ba87cb85d16ff51959"
     )
+
+
+def test_readme_documents_explicit_lasg02_dt0025_resume_directory():
+    readme = (REPO / "tracks" / "ed" / "README.md").read_text()
+    assert "TURNER_ITEBD_DT=0.025" in readme
+    assert "TURNER_OUTPUT_DIR=/public/home/student090/results/fig2-itebd-dt0025" in readme
+    assert "does not change existing dt=0.05 jobs" in readme

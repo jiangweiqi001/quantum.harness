@@ -11,7 +11,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pytest
 
-from pxp_ed import constrained_basis, density_wave_state, pxp_hamiltonian
+from pxp_ed import (
+    constrained_basis,
+    density_wave_state,
+    pxp_hamiltonian,
+    symmetry_basis_k0_inversion_even,
+)
 import turner2018_fig3 as fig3
 import turner2018_l32_server as server
 from turner2018_official import pr2_fsa_averages, select_fig3_pr2_states
@@ -37,6 +42,74 @@ def test_fsa_basis_is_orthonormal_and_resolves_hamming_distance():
     for distance, vector in enumerate(vectors):
         support = np.flatnonzero(np.abs(vector) > 1e-12)
         assert all((int(basis[i]) ^ z2).bit_count() == distance for i in support)
+
+
+def test_unfold_folded_shell_amplitudes_preserves_norm_and_reflection_parity():
+    folded = np.asarray([np.sqrt(2.0), 2.0 * np.sqrt(2.0), 3.0])
+
+    even = fig3.unfold_folded_shell_amplitudes(folded, length=4)
+    odd = fig3.unfold_folded_shell_amplitudes(
+        folded, length=4, reflection_parity=-1
+    )
+
+    np.testing.assert_allclose(even, [1.0, 2.0, 3.0, 2.0, 1.0])
+    np.testing.assert_allclose(odd, [1.0, 2.0, 3.0, -2.0, -1.0])
+    assert np.vdot(even, even) == pytest.approx(np.vdot(folded, folded))
+    assert np.vdot(odd, odd) == pytest.approx(np.vdot(folded, folded))
+
+
+def test_symmetry_unfold_matches_direct_small_l_selected_shell_probabilities():
+    length = 10
+    result = analyze_spectrum(length)
+    fsa_vectors = np.asarray(result["fsa_eigenvectors"]).real
+    tower, _resolutions = fig3.match_independent_fsa_tower(
+        result["energies"],
+        result["exact_shell_amplitudes"],
+        fsa_vectors,
+        fsa_energies=result["fsa_energies"],
+    )
+    selections = fig3.select_fig3_shell_panel_states(
+        length=length,
+        energies=result["energies"],
+        exact_shell_amplitudes=result["exact_shell_amplitudes"],
+        fsa_hamiltonian_sector=np.asarray(
+            result["fsa_hamiltonian_sector"]
+        ).real,
+        matched_tower={"tower": tower},
+    )
+
+    basis = constrained_basis(length, pbc=True)
+    hamiltonian = pxp_hamiltonian(basis, length, pbc=True)
+    transform = symmetry_basis_k0_inversion_even(basis, length)
+    reduced = (transform.T @ hamiltonian @ transform).toarray()
+    energies, eigenvectors = np.linalg.eigh(reduced)
+    full_shells, _beta = fsa_basis(
+        hamiltonian, basis, density_wave_state(length, 2), length
+    )
+    direct_shells = np.asarray(transform.T @ full_shells.T).T
+    scale = length / 2.0
+    for selection in selections:
+        exact_index = selection["exact_index"]
+        assert energies[exact_index] == pytest.approx(selection["exact_energy"])
+        direct = direct_shells @ eigenvectors[:, exact_index]
+        unfolded = fig3.unfold_folded_shell_amplitudes(
+            result["exact_shell_amplitudes"][:, exact_index], length
+        )
+        np.testing.assert_allclose(
+            scale * np.abs(unfolded) ** 2,
+            scale * np.abs(direct) ** 2,
+            atol=0.025,
+            rtol=0.0,
+        )
+        plotted = scale * np.abs(unfolded) ** 2
+        np.testing.assert_allclose(plotted, plotted[::-1], atol=0.0, rtol=0.0)
+        if selection["panel"] == "b":
+            assert abs(int(np.argmax(plotted)) - length // 2) <= 1
+        else:
+            local_turns = np.count_nonzero(
+                np.diff(np.sign(np.diff(plotted))) != 0
+            )
+            assert local_turns >= length // 2
 
 
 def test_overlap_weights_and_participation_ratios_are_normalized():
@@ -98,8 +171,11 @@ def test_shell_panel_selector_uses_lowest_and_negative_adjacent_matched_states()
     assert panel_b["full_fsa_shell_count"] == inputs["length"] + 1
     assert panel_b["plotted_folded_shell_count"] == inputs["length"] // 2 + 1
     assert panel_b["folding"] == (
-        "k=0 inversion-even: n and L-n are symmetry-related"
+        "normalized inversion-even amplitudes unfolded as "
+        "(|n>+|L-n>)/sqrt(2), with n=L/2 unchanged"
     )
+    assert panel_b["displayed_full_shell_count"] == inputs["length"] + 1
+    assert panel_b["vertical_scale_factor"] == inputs["length"] / 2
     assert panel_b["exact_weight_sum"] == pytest.approx(0.64)
     assert panel_b["fsa_weight_sum"] == pytest.approx(1.0)
     assert panel_b["match_strength"] == pytest.approx(0.64)
@@ -109,8 +185,24 @@ def test_shell_panel_selector_uses_lowest_and_negative_adjacent_matched_states()
     assert panel_b["fsa_nearest_gap"] > panel_b["fsa_gap_tolerance"]
     assert panel_c["fsa_nearest_gap"] > panel_c["fsa_gap_tolerance"]
     np.testing.assert_array_equal(
-        panel_b["shell"], np.arange(inputs["length"] // 2 + 1)
+        panel_b["shell"], np.arange(inputs["length"] + 1)
     )
+
+
+def test_shell_panel_selector_excludes_central_fsa_state_for_panel_c():
+    energies = np.asarray([-4.0, -2.0, -0.1, 2.0, 4.0])
+    amplitudes = np.eye(5)
+    panel_b, panel_c = fig3.select_fig3_shell_panel_states(
+        length=8,
+        energies=energies,
+        exact_shell_amplitudes=amplitudes,
+        fsa_hamiltonian_sector=np.diag([-4.0, -2.0, 0.0, 2.0, 4.0]),
+        matched_tower={"tower": np.arange(5)},
+    )
+
+    assert panel_b["fsa_index"] == 0
+    assert panel_c["fsa_index"] == 1
+    assert panel_c["exact_energy"] == -2.0
 
 
 def test_shell_panel_selector_result_is_structurally_immutable():
@@ -142,7 +234,7 @@ def test_shell_panel_selector_rejects_rotated_degenerate_selected_fsa_basis(
     inputs = _synthetic_shell_panel_inputs()
     original_eigh = np.linalg.eigh
     _energies, baseline_vectors = original_eigh(inputs["fsa_hamiltonian_sector"])
-    degenerate_energies = np.asarray([0.0, 0.0, 1.0, 2.0])
+    degenerate_energies = np.asarray([-1.0, -1.0, 1.0, 2.0])
 
     for angle in (0.0, np.pi / 7.0):
         rotation = np.eye(4)
@@ -169,13 +261,13 @@ def test_shell_panel_selector_records_folded_shell_count(length, plotted):
     assert panel_b["full_fsa_shell_count"] == length + 1
     assert panel_b["plotted_folded_shell_count"] == plotted
     assert panel_c["plotted_folded_shell_count"] == plotted
-    assert len(panel_b["shell"]) == plotted
+    assert panel_b["displayed_full_shell_count"] == length + 1
+    assert len(panel_b["shell"]) == length + 1
 
 
 def test_shell_panel_selector_excludes_zero_modes_and_requires_negative_candidate():
     inputs = _synthetic_shell_panel_inputs()
-    tower = inputs["matched_tower"]["tower"]
-    inputs["energies"][tower] = np.asarray([0.0, 0.0, 0.4, 1.0])
+    inputs["fsa_hamiltonian_sector"] = np.diag([0.0, 1.0, 2.0, 3.0])
 
     with pytest.raises(ValueError, match="negative.*adjacent"):
         fig3.select_fig3_shell_panel_states(**inputs)
@@ -228,6 +320,31 @@ def test_official_pr2_available_sizes_are_unconnected_markers():
     for line in lines:
         np.testing.assert_array_equal(line.get_xdata(), [26, 32])
     plt.close(figure)
+
+
+def test_particle_hole_tie_resolution_selects_negative_representative():
+    energies = np.array([-2.0, -0.1, 0.1, 2.0])
+    amplitudes = np.zeros((3, 4))
+    amplitudes[0, 0] = 1.0
+    amplitudes[1, 1:3] = np.sqrt(0.4)
+    amplitudes[2, 3] = 1.0
+
+    tower, resolutions = fig3.match_independent_fsa_tower(
+        energies,
+        amplitudes,
+        np.eye(3),
+        fsa_energies=np.array([-2.0, 0.0, 2.0]),
+    )
+
+    np.testing.assert_array_equal(tower, [0, 1, 3])
+    assert resolutions == [
+        {
+            "fsa_index": 1,
+            "policy": "particle-hole-pair-negative-representative",
+            "candidate_indices": [1, 2],
+            "candidate_energies": [-0.1, 0.1],
+        }
+    ]
 
 
 def _independent_result(root, length=10):
@@ -334,11 +451,23 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
     original_write_png = fig3._write_png_partial
 
     def inspect_shell_panels(partial, figure):
+        rendered_panels["label_positions"] = {
+            label: next(
+                text.get_position()
+                for text in panel.texts
+                if text.get_text() == f"({label})"
+            )
+            for label, panel in zip(("a", "b", "c", "d"), figure.axes)
+        }
         for label, panel in zip(("b", "c"), figure.axes[1:3]):
             rendered_panels[label] = {
                 "title": panel.get_title(),
                 "xlabel": panel.get_xlabel(),
                 "ylabel": panel.get_ylabel(),
+                "xlim": panel.get_xlim(),
+                "xticks": panel.get_xticks(),
+                "ylim": panel.get_ylim(),
+                "yticks": panel.get_yticks(),
                 "panel_label_position": next(
                     text.get_position()
                     for text in panel.texts
@@ -412,13 +541,13 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
         )
         negative_fsa = [
             index
-            for index, exact_index in enumerate(tower)
-            if independent["energies"][exact_index] < -1e-10
+            for index in range(len(tower))
+            if independent["fsa_energies"][index] < -1e-10
         ]
         expected_c_fsa = min(
             negative_fsa,
             key=lambda index: (
-                abs(independent["energies"][tower[index]]),
+                abs(independent["fsa_energies"][index]),
                 int(tower[index]),
             ),
         )
@@ -426,21 +555,39 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
             exact_index = int(tower[fsa_index])
             np.testing.assert_allclose(
                 sidecar[f"panel_{panel}_L10_exact_weights"],
-                np.abs(
-                    independent["exact_shell_amplitudes"][:, exact_index]
+                5.0
+                * np.abs(
+                    fig3.unfold_folded_shell_amplitudes(
+                        independent["exact_shell_amplitudes"][:, exact_index],
+                        10,
+                    )
                 )
                 ** 2,
             )
             np.testing.assert_allclose(
                 sidecar[f"panel_{panel}_L10_fsa_weights"],
-                np.abs(independent["fsa_vectors"][:, fsa_index]) ** 2,
+                5.0
+                * np.abs(
+                    fig3.unfold_folded_shell_amplitudes(
+                        independent["fsa_vectors"][:, fsa_index], 10
+                    )
+                )
+                ** 2,
             )
             np.testing.assert_array_equal(
-                sidecar[f"panel_{panel}_L10_shell"], np.arange(6)
+                sidecar[f"panel_{panel}_L10_shell"], np.arange(11)
             )
             rendered = rendered_panels[panel]
-            assert rendered["xlabel"] == "folded FSA shell index n"
-            assert rendered["ylabel"] == "squared shell weight"
+            assert rendered["xlabel"] == "n"
+            assert rendered["ylabel"] == r"$(L/2)|\langle n|\psi\rangle|^2$"
+            assert rendered["xlim"] == pytest.approx((0.0, 10.0))
+            np.testing.assert_array_equal(rendered["xticks"], [0.0, 10.0])
+            expected_ylim = (0.0, 4.2) if panel == "b" else (0.0, 2.1)
+            expected_yticks = (
+                [0.0, 2.0, 4.0] if panel == "b" else [0.0, 1.0, 2.0]
+            )
+            assert rendered["ylim"] == pytest.approx(expected_ylim)
+            np.testing.assert_array_equal(rendered["yticks"], expected_yticks)
             assert len(rendered["lines"]) == 2
             exact_line, fsa_line = rendered["lines"]
             assert exact_line["color"] == "black"
@@ -448,15 +595,16 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
             assert exact_line["linestyle"] == "-"
             assert exact_line["label"] == "exact"
             assert fsa_line["color"] == "red"
-            assert fsa_line["marker"] == "x"
-            assert fsa_line["linestyle"] == "--"
+            assert fsa_line["marker"] == "o"
+            assert fsa_line["linestyle"] == "-"
             assert fsa_line["label"] == "FSA"
-            assert len(exact_line["x"]) == len(fsa_line["x"]) == 6
-        assert "lowest scar-tower state" in rendered_panels["b"]["title"]
-        assert "scar-tower state adjacent to E=0" in rendered_panels["c"]["title"]
-        assert rendered_panels["c"]["panel_label_position"] != pytest.approx(
-            (0.02, 0.96)
-        )
+            assert len(exact_line["x"]) == len(fsa_line["x"]) == 11
+            np.testing.assert_array_equal(exact_line["x"], np.arange(11))
+        assert rendered_panels["b"]["title"] == ""
+        assert rendered_panels["c"]["title"] == ""
+        assert rendered_panels["label_positions"] == {
+            label: (0.02, 1.04) for label in ("a", "b", "c", "d")
+        }
 
     metrics = json.loads(figure_path.with_suffix(".json").read_text())
     assert metrics["generation_id"] == sidecar_generation
@@ -490,8 +638,15 @@ def test_independent_renderer_uses_only_validated_artifacts_for_generated_series
     assert fsa["shell_dimensions"] == [6, 14]
     assert fsa["full_fsa_shell_count"] == 11
     assert fsa["plotted_folded_shell_count"] == 6
-    assert fsa["folding"] == "k=0 inversion-even: n and L-n are symmetry-related"
-    assert fsa["normalization_convention"] == "unit-norm projected shells"
+    assert fsa["displayed_full_shell_count"] == 11
+    assert fsa["folding"] == (
+        "normalized inversion-even amplitudes unfolded as "
+        "(|n>+|L-n>)/sqrt(2), with n=L/2 unchanged"
+    )
+    assert fsa["normalization_convention"] == (
+        "unit-norm folded projections; paired amplitudes divided by sqrt(2), "
+        "center unchanged; plotted by (L/2)|amplitude|^2"
+    )
     assert fsa["sign_convention"] == "raw persisted real shell amplitudes"
     assert len(fsa["match_strengths"]) == 6
     assert all(value > 0 for value in fsa["match_strengths"])
@@ -1031,6 +1186,11 @@ def test_independent_panel_a_is_logarithmic_without_replacing_zero_overlaps(
         captured["yscale"] = panel.get_yscale()
         captured["ed_y"] = np.asarray(panel.collections[0].get_offsets())[:, 1]
         captured["fsa_y"] = np.asarray(panel.collections[1].get_offsets())[:, 1]
+        captured["xlim"] = panel.get_xlim()
+        captured["xticks"] = panel.get_xticks()
+        captured["ylim"] = panel.get_ylim()
+        captured["yticks"] = panel.get_yticks()
+        captured["ylabel"] = panel.get_ylabel()
         original_write(partial, figure)
 
     monkeypatch.setattr(fig3, "_write_png_partial", inspect_panel)
@@ -1041,18 +1201,25 @@ def test_independent_panel_a_is_logarithmic_without_replacing_zero_overlaps(
         official_data_dir=None,
     )
 
-    assert captured["yscale"] == "log"
-    np.testing.assert_array_equal(captured["ed_y"], overlap)
-    np.testing.assert_array_equal(captured["fsa_y"], fsa_overlap)
-    assert captured["ed_y"][0] > 0
-    assert captured["ed_y"][1] == pytest.approx(1e-12)
-    assert np.count_nonzero(captured["ed_y"] == 0.0) == overlap.size - 2
+    assert captured["yscale"] == "linear"
+    assert captured["ed_y"][0] == pytest.approx(np.log10(overlap[0]))
+    assert captured["ed_y"][1] == pytest.approx(-12.0)
+    assert np.count_nonzero(~np.isfinite(captured["ed_y"])) == overlap.size - 2
+    assert captured["xlim"] == pytest.approx((-20.0, 20.0))
+    np.testing.assert_array_equal(captured["xticks"], [-20, -10, 0, 10, 20])
+    assert captured["ylim"] == pytest.approx((-10.0, 0.0))
+    np.testing.assert_array_equal(captured["yticks"], [-10, -8, -6, -4, -2, 0])
+    assert captured["ylabel"] == r"$\log_{10}|\langle Z_2|\psi\rangle|^2$"
     with np.load(path.with_suffix(".npz"), allow_pickle=False) as sidecar:
         np.testing.assert_array_equal(sidecar["panel_a_L10_overlap_z2"], overlap)
     metrics = json.loads(path.with_suffix(".json").read_text())
     assert metrics["plot_conventions"]["panel_a"] == {
-        "y_scale": "log",
-        "nonpositive": "masked",
+        "x_range": [-20.0, 20.0],
+        "x_ticks": [-20.0, -10.0, 0.0, 10.0, 20.0],
+        "y_coordinate": "log10(overlap)",
+        "y_range": [-10.0, 0.0],
+        "y_ticks": [-10.0, -8.0, -6.0, -4.0, -2.0, 0.0],
+        "nonpositive": "NaN-masked",
         "stored_overlap_values": "unmodified",
     }
 
@@ -1063,16 +1230,20 @@ def test_legacy_panel_a_uses_paper_logarithmic_overlap_axis(tmp_path, monkeypatc
 
     def inspect_panel(figure, *args, **kwargs):
         captured["yscale"] = figure.axes[0].get_yscale()
+        captured["ylim"] = figure.axes[0].get_ylim()
+        captured["yticks"] = figure.axes[0].get_yticks()
         return original_savefig(figure, *args, **kwargs)
 
     monkeypatch.setattr(plt.Figure, "savefig", inspect_panel)
 
     fig3.run_figure(10, output_dir=tmp_path, official_data_dir=None)
 
-    assert captured["yscale"] == "log"
+    assert captured["yscale"] == "linear"
+    assert captured["ylim"] == pytest.approx((-10.0, 0.0))
+    np.testing.assert_array_equal(captured["yticks"], [-10, -8, -6, -4, -2, 0])
 
 
-def test_legacy_official_l32_shell_panels_use_seventeen_folded_points(
+def test_legacy_official_l32_shell_panels_use_thirty_three_unfolded_points(
     tmp_path, monkeypatch
 ):
     official_root = tmp_path / "official"
@@ -1156,32 +1327,40 @@ def test_legacy_official_l32_shell_panels_use_seventeen_folded_points(
     )
     expected_c_fsa = min(
         (
-            index
-            for index, exact_index in enumerate(tower)
-            if fixture["energies"][exact_index] < -1e-10
+            index for index in range(len(tower)) if fsa_energies[index] < -1e-10
         ),
         key=lambda index: (
-            abs(fixture["energies"][tower[index]]),
+            abs(fsa_energies[index]),
             int(tower[index]),
         ),
     )
-    for panel, role, fsa_index in (
-        ("b", "lowest scar-tower state", expected_b_fsa),
-        ("c", "scar-tower state adjacent to E=0", expected_c_fsa),
+    for panel, fsa_index in (
+        ("b", expected_b_fsa),
+        ("c", expected_c_fsa),
     ):
         exact_index = int(tower[fsa_index])
         record = captured[panel]
-        assert role in record["title"]
-        assert f"E={fixture['energies'][exact_index]:.2f}" in record["title"]
+        assert record["title"] == ""
         assert len(record["lines"]) == 2
         exact_line, fsa_line = record["lines"]
-        np.testing.assert_array_equal(exact_line["x"], np.arange(17))
+        np.testing.assert_array_equal(exact_line["x"], np.arange(33))
         np.testing.assert_allclose(
             exact_line["y"],
-            np.abs(fixture["exact_shell_amplitudes"][:, exact_index]) ** 2,
+            16.0
+            * np.abs(
+                fig3.unfold_folded_shell_amplitudes(
+                    fixture["exact_shell_amplitudes"][:, exact_index], 32
+                )
+            )
+            ** 2,
         )
         np.testing.assert_allclose(
-            fsa_line["y"], np.abs(fsa_vectors[:, fsa_index]) ** 2
+            fsa_line["y"],
+            16.0
+            * np.abs(
+                fig3.unfold_folded_shell_amplitudes(fsa_vectors[:, fsa_index], 32)
+            )
+            ** 2,
         )
         assert (exact_line["color"], exact_line["marker"], exact_line["linestyle"]) == (
             "black",
@@ -1190,8 +1369,8 @@ def test_legacy_official_l32_shell_panels_use_seventeen_folded_points(
         )
         assert (fsa_line["color"], fsa_line["marker"], fsa_line["linestyle"]) == (
             "red",
-            "x",
-            "--",
+            "o",
+            "-",
         )
         assert (exact_line["label"], fsa_line["label"]) == ("exact", "FSA")
     assert captured["c"]["panel_label_position"] != pytest.approx((0.02, 0.96))

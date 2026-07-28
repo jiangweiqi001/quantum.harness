@@ -7,7 +7,11 @@ import inspect
 from turner2018_ed_engine import assemble_reduced_hamiltonian, build_orbit_basis
 import turner2018_ed_solver as solver_module
 import turner2018_ed_validation as validation_module
-from turner2018_ed_solver import estimate_dense_resources, solve_full_eigensystem
+from turner2018_ed_solver import (
+    estimate_dense_resources,
+    lapack_driver_for_dimension,
+    solve_full_eigensystem,
+)
 
 
 def _reduced_hamiltonian(length: int) -> sp.csr_matrix:
@@ -19,6 +23,13 @@ def test_l32_dense_resource_estimate():
     assert estimate.matrix_bytes == 47_970_672_768
     assert estimate.eigenvector_bytes == 47_970_672_768
     assert estimate.minimum_requested_bytes >= 4 * estimate.matrix_bytes
+
+
+def test_lapack_driver_avoids_lp64_evd_workspace_overflow():
+    assert lapack_driver_for_dimension(13_201, vectors=True) == "evd"
+    assert lapack_driver_for_dimension(31_836, vectors=True) == "evd"
+    assert lapack_driver_for_dimension(77_436, vectors=True) == "evr"
+    assert lapack_driver_for_dimension(77_436, vectors=False) == "evd"
 
 
 def test_dense_solver_rejects_nonsymmetric_input():

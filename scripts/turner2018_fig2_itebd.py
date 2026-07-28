@@ -668,6 +668,8 @@ def render_figures(
         axes[1].set_ylabel("entropy residual")
         axes[2].set_ylabel(r"$\langle Z_i Z_{i+1}\rangle$")
         axes[2].set_xlabel("time")
+        if x_limit is not None and x_limit >= 20.0:
+            axes[2].set_xticks([0.0, 5.0, 10.0, 15.0, 20.0])
         for axis in axes:
             axis.legend(ncol=2, fontsize=7)
             axis.grid(alpha=0.2)

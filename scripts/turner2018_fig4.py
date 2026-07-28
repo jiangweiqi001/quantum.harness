@@ -20,6 +20,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
+from scipy.interpolate import PchipInterpolator
 
 from pxp_ed import (
     constrained_basis,
@@ -69,9 +70,9 @@ THEORY_CURVE_STYLES = {
     "goe": {"color": "0.35", "linestyle": "-.", "linewidth": 1.2},
 }
 THEORY_CURVE_LABELS = {
-    "poisson": "Poisson",
-    "semi-poisson": "Semi-Poisson",
-    "goe": "Wigner-Dyson (GOE)",
+    "poisson": "P",
+    "semi-poisson": "SP",
+    "goe": "WD",
 }
 
 
@@ -87,6 +88,27 @@ def _zip_has_member(path: Path, member: str) -> bool:
 
 def _load_independent_fig4_length(directory: Path) -> dict[str, Any]:
     """Load one validated energy vector from stable open Task 6 handles."""
+    if (directory / "compact.json").is_file() and not (
+        directory / "eigensystem.h5"
+    ).is_file():
+        from turner2018_compact import load_compact_package
+
+        compact = load_compact_package(directory)
+        return {
+            key: compact[key]
+            for key in (
+                "source",
+                "directory",
+                "length",
+                "full_dimension",
+                "sector_dimension",
+                "energies",
+                "source_hashes",
+                "energy_dataset_metadata",
+                "eigenvector_metadata",
+            )
+        }
+
     from turner2018_l32_server import (
         _fingerprint_sha256,
         build_execution_fingerprint,
@@ -679,41 +701,92 @@ def _plot_independent_length(
     color: Any,
 ) -> None:
     if statistics is None:
-        axis.text(
-            0.5,
-            0.58,
-            "Exact paper window too short\n(no substituted spectrum)",
-            transform=axis.transAxes,
-            ha="center",
-            va="center",
+        axis.plot(
+            [],
+            [],
+            color=color,
+            linestyle=":",
+            linewidth=1.2,
+            label=f"L={length} unavailable (paper window)",
         )
     else:
-        axis.step(
+        curve_x, curve_y = _smooth_density_curve(
             np.asarray(statistics["histogram_centers"]),
             np.asarray(statistics["histogram_density"]),
-            where="mid",
+        )
+        axis.plot(
+            curve_x,
+            curve_y,
             linewidth=1.8,
+            linestyle="-",
             color=color,
-            label=f"independent ED L={length}",
+            label=f"L={length}",
         )
     if official_xy is not None:
-        axis.plot(
-            official_xy[1:, 0],
-            official_xy[1:, 1],
-            linestyle="none",
-            marker="o",
-            markersize=3.2,
-            markerfacecolor="none",
-            markeredgecolor=color,
-            label=f"official DOI L={length}",
+        official_x, official_y = _smooth_density_curve(
+            official_xy[1:, 0], official_xy[1:, 1]
         )
+        axis.plot(
+            official_x,
+            official_y,
+            linestyle="--",
+            linewidth=1.2,
+            label=f"L={length} official",
+        )
+
+
+def _smooth_density_curve(
+    centers: np.ndarray, density: np.ndarray, *, samples_per_bin: int = 12
+) -> tuple[np.ndarray, np.ndarray]:
+    """Shape-preserving display interpolation through persisted histogram points."""
+    x = np.asarray(centers, dtype=np.float64)
+    y = np.asarray(density, dtype=np.float64)
+    if (
+        x.ndim != 1
+        or y.shape != x.shape
+        or len(x) < 2
+        or not np.all(np.isfinite(x))
+        or not np.all(np.isfinite(y))
+        or np.any(np.diff(x) <= 0.0)
+    ):
+        raise ValueError("density curve points must be finite and strictly ordered")
+    grid = np.linspace(x[0], x[-1], samples_per_bin * (len(x) - 1) + 1)
+    values = PchipInterpolator(x, y)(grid)
+    return grid, np.maximum(values, 0.0)
+
+
+def _plot_density_of_states_inset(
+    axis: plt.Axes, energies: np.ndarray
+) -> plt.Axes:
+    """Render the paper's L=32 density-of-states inset."""
+    values = np.asarray(energies, dtype=np.float64)
+    if values.ndim != 1 or not np.all(np.isfinite(values)):
+        raise ValueError("density-of-states energies must be finite and one-dimensional")
+    density, edges = np.histogram(
+        values, bins=np.linspace(-20.0, 20.0, 121), density=True
+    )
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    curve_x, curve_y = _smooth_density_curve(centers, density)
+    inset = axis.inset_axes([0.59, 0.57, 0.37, 0.37])
+    inset.plot(curve_x, curve_y, color="black", linewidth=1.0)
+    inset.set_xlim(-20.0, 20.0)
+    inset.set_xticks([-20.0, -10.0, 0.0, 10.0, 20.0])
+    inset.set_ylim(0.0, 0.12)
+    inset.set_yticks([0.0, 0.1])
+    inset.set_xlabel("$E$", fontsize=7)
+    inset.set_ylabel(r"$\rho(E)$", fontsize=7)
+    inset.tick_params(labelsize=6)
+    return inset
 
 
 def _finish_independent_axis(axis: plt.Axes, title: str) -> None:
     _plot_theory_reference_curves(axis)
-    axis.set_xlim(0.0, 4.8)
-    axis.set_xlabel("unfolded spacing s")
-    axis.set_ylabel("P(s)")
+    axis.set_xlim(0.0, 5.0)
+    axis.set_xticks(np.arange(0.0, 5.1, 1.0))
+    axis.set_ylim(0.0, 1.05)
+    axis.set_yticks(np.arange(0.0, 1.01, 0.2))
+    axis.set_xlabel(r"$s$")
+    axis.set_ylabel(r"$P(s)$")
     axis.set_title(title)
     axis.grid(alpha=0.2)
     axis.legend(fontsize=8)
@@ -723,10 +796,12 @@ def _acceptance_for_lengths(
     lengths: list[int],
     statistics_by_length: dict[int, dict[str, np.ndarray | int] | None],
 ) -> dict[str, Any]:
+    required_lengths = [length for length in lengths if length in PAPER_LENGTHS]
+    statistics_required = bool(required_lengths)
+    checked_lengths = required_lengths if statistics_required else lengths
     statistics_passed = all(
-        statistics_by_length[length] is not None for length in lengths
+        statistics_by_length[length] is not None for length in checked_lengths
     )
-    statistics_required = any(length in PAPER_LENGTHS for length in lengths)
     return {
         "passed": bool(not statistics_required or statistics_passed),
         "provenance_passed": True,
@@ -779,6 +854,15 @@ def _scoped_metrics(
     )
     metrics["layout"] = {"kind": layout_kind, "lengths": scope}
     return metrics
+
+
+def _scoped_arrays(
+    arrays: dict[str, np.ndarray], scope: list[int]
+) -> dict[str, np.ndarray]:
+    prefixes = tuple(f"L{length}_" for length in scope)
+    return {
+        name: value for name, value in arrays.items() if name.startswith(prefixes)
+    }
 
 
 def render_independent_fig4(
@@ -915,6 +999,26 @@ def render_independent_fig4(
             "spacing_renormalized": False,
             "histogram_edges": PAPER_HISTOGRAM_EDGES.tolist(),
         },
+        "plot_conventions": {
+            "histogram_rendering": (
+                "shape-preserving PCHIP display interpolation through persisted "
+                "bin-center densities; histogram values remain unmodified"
+            ),
+            "generated": "solid curves",
+            "official": "dashed curves",
+            "theory_labels": dict(THEORY_CURVE_LABELS),
+            "x_range": [0.0, 5.0],
+            "x_ticks": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            "y_range": [0.0, 1.05],
+            "y_ticks": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            "density_of_states_inset": {
+                "length": 32,
+                "x_range": [-20.0, 20.0],
+                "x_ticks": [-20.0, -10.0, 0.0, 10.0, 20.0],
+                "y_range": [0.0, 0.12],
+                "y_ticks": [0.0, 0.1],
+            },
+        },
         "series": series,
         "lengths": metrics_by_length,
         "official_data": (
@@ -935,55 +1039,75 @@ def render_independent_fig4(
     }
 
     colors = plt.get_cmap("tab10")
-    all_path = output_dir / "fig4_independent_all.png"
+    paper_lengths = [length for length in PAPER_LENGTHS if length in results]
+    paper_path = output_dir / "fig4_paper_comparison.png"
+    supplemental_path = output_dir / "fig4_supplemental_L22-L32.png"
     paths = {
-        "figure_all": all_path,
+        "figure_supplemental": supplemental_path,
         **{
             f"figure_L{length}": output_dir / f"fig4_independent_L{length}.png"
             for length in lengths
         },
     }
+    if paper_lengths:
+        paths = {"figure_paper": paper_path, **paths}
     targets = tuple(
         target
         for path in paths.values()
         for target in (path, path.with_suffix(".npz"), path.with_suffix(".json"))
     )
-    existing = [target.is_file() for target in targets]
-    if any(existing) and not all(existing):
-        raise RuntimeError(
-            "refusing to replace an incomplete prior Fig. 4 output set"
-        )
+    for path in paths.values():
+        triplet = (path, path.with_suffix(".npz"), path.with_suffix(".json"))
+        existing = [target.is_file() for target in triplet]
+        if any(existing) and not all(existing):
+            raise RuntimeError(
+                "refusing to replace an incomplete prior Fig. 4 output triplet"
+            )
     partials = {
         target: target.with_name(target.name + ".partial") for target in targets
     }
     generation_id = str(uuid.uuid4())
     try:
-        figure, axis = plt.subplots(figsize=(7.2, 5.0))
-        for index, length in enumerate(lengths):
-            _plot_independent_length(
-                axis,
-                length=length,
-                statistics=statistics_by_length[length],
-                official_xy=_official_xy(official_by_length.get(length)),
-                color=colors(index % 10),
-            )
-        _finish_independent_axis(
-            axis, "Turner et al. (2018) Fig. 4 — independent ED sizes"
-        )
-        figure.tight_layout()
-        _write_figure_generation_partials(
-            all_path,
-            figure,
-            arrays,
-            _scoped_metrics(
-                base_metrics,
+        aggregate_specs = [
+            (
+                supplemental_path,
                 lengths,
-                statistics_by_length,
-                layout_kind="all-sizes",
-            ),
-            generation_id,
-            partials,
-        )
+                "supplemental-finite-size",
+                "Supplemental finite-size comparison — L=22–32",
+            )
+        ]
+        if paper_lengths:
+            aggregate_specs.insert(
+                0, (paper_path, paper_lengths, "paper-comparison", "")
+            )
+        for path, scope, layout_kind, title in aggregate_specs:
+            figure, axis = plt.subplots(figsize=(7.2, 5.0))
+            for index, length in enumerate(scope):
+                _plot_independent_length(
+                    axis,
+                    length=length,
+                    statistics=statistics_by_length[length],
+                    official_xy=_official_xy(official_by_length.get(length)),
+                    color=colors(index % 10),
+                )
+            _finish_independent_axis(axis, title)
+            if 32 in scope:
+                _plot_density_of_states_inset(axis, results[32]["energies"])
+                axis.legend(loc="lower right", fontsize=7)
+            figure.tight_layout()
+            _write_figure_generation_partials(
+                path,
+                figure,
+                _scoped_arrays(arrays, scope),
+                _scoped_metrics(
+                    base_metrics,
+                    scope,
+                    statistics_by_length,
+                    layout_kind=layout_kind,
+                ),
+                generation_id,
+                partials,
+            )
 
         for index, length in enumerate(lengths):
             figure, axis = plt.subplots(figsize=(6.4, 4.5))
@@ -1028,7 +1152,7 @@ def render_independent_fig4(
             )
         raise
     try:
-        _publish_generation(partials)
+        _publish_generation(partials, allow_mixed_previous=True)
     except Exception as publish_error:
         try:
             _cleanup_generation_partials(partials)
@@ -1059,7 +1183,7 @@ def render_fig4_stage(
     expected = output_dir / "figures" / f"fig4_independent_L{length}.png"
     if paths.get(f"figure_L{length}") != expected:
         raise RuntimeError(f"Fig. 4 renderer did not produce expected L={length}")
-    return paths["figure_all"]
+    return paths["figure_supplemental"]
 
 
 def _paper_or_small_system_window(energies: np.ndarray) -> tuple[np.ndarray, str]:
@@ -1183,22 +1307,19 @@ def _plot_reconstructed_and_official(
     show_legend: bool = True,
 ) -> None:
     color = PAPER_LENGTH_COLORS[length]
-    axis.step(
+    axis.plot(
         PAPER_HISTOGRAM_CENTERS,
         np.asarray(reconstruction["histogram_density"]),
-        where="mid",
         linewidth=1.8,
+        linestyle="-",
         color=color,
         label=f"L={length} reconstructed",
     )
     axis.plot(
         official_xy[1:, 0],
         official_xy[1:, 1],
-        linestyle="none",
-        marker="o",
-        markersize=3.2,
-        markerfacecolor="none",
-        markeredgecolor=color,
+        linestyle="--",
+        linewidth=1.2,
         color=color,
         label=f"L={length} official",
     )

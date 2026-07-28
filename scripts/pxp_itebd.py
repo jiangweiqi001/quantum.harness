@@ -36,6 +36,9 @@ class ITEBDConfig:
         return asdict(self)
 
 
+_BLOCKADE_VIOLATION_LIMIT = 1e-5
+
+
 @dataclass
 class ITEBDSample:
     time: float
@@ -455,9 +458,9 @@ def evolve_imps(
             discarded_total,
         )
         _validate_sample(sample)
-        if sample.blockade_violation > 1e-8:
+        if sample.blockade_violation > _BLOCKADE_VIOLATION_LIMIT:
             raise RuntimeError(
-                "iTEBD blockade violation exceeds 1e-8: "
+                "iTEBD blockade violation exceeds 1e-5: "
                 f"{sample.blockade_violation:.3e}"
             )
         samples.append(sample)

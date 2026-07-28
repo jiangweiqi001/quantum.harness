@@ -31,10 +31,11 @@ from pxp_ed import (
     symmetry_basis_k0_inversion_even,
 )
 from turner2018_official import (
+    FSA_MATCH_TIE_ATOL,
+    FSA_MATCH_TIE_RTOL,
     load_fig3_fsa,
     load_fig3_overlap,
     load_fig3_pr2_scaling,
-    match_fsa_tower,
     pr2_fsa_averages,
     select_fig3_pr2_states,
 )
@@ -228,13 +229,20 @@ def _cleanup_published_backups(
     _unlink_durable(recovery_path)
 
 
-def _publish_generation(partials: dict[Path, Path]) -> None:
+def _publish_generation(
+    partials: dict[Path, Path], *, allow_mixed_previous: bool = False
+) -> None:
     """Publish one file set or durably restore/preserve its predecessor."""
     targets = tuple(partials)
     existing = [target.is_file() for target in targets]
-    if any(existing) and not all(existing):
+    if any(existing) and not all(existing) and not allow_mixed_previous:
         raise RuntimeError("refusing to replace an incomplete prior Fig. 3 generation")
     backups = {target: target.with_name(target.name + ".backup") for target in targets}
+    previous_backups = {
+        target: backups[target]
+        for target, had_previous in zip(targets, existing)
+        if had_previous
+    }
     recovery_path = _recovery_manifest_path(targets)
     if recovery_path.is_file():
         raise RuntimeError(
@@ -251,10 +259,10 @@ def _publish_generation(partials: dict[Path, Path]) -> None:
                 ) from error
 
     cleanup_until_failure(backups.values(), "stale backup cleanup")
-    if all(existing):
+    if any(existing):
         created_backups: list[Path] = []
         try:
-            for target, backup in backups.items():
+            for target, backup in previous_backups.items():
                 os.link(target, backup)
                 created_backups.append(backup)
                 _fsync_parent(backup)
@@ -305,8 +313,8 @@ def _publish_generation(partials: dict[Path, Path]) -> None:
         raise publish_error
 
     cleanup_until_failure(partials.values(), "published partial cleanup")
-    if all(existing):
-        _cleanup_published_backups(targets, backups)
+    if any(existing):
+        _cleanup_published_backups(targets, previous_backups)
 
 
 def _discover_task6_directories(root: Path) -> list[Path]:
@@ -360,6 +368,64 @@ def _scientific_dimensions(
 
 def _load_independent_length(directory: Path) -> dict[str, Any]:
     """Load one current Task 6 result without materializing eigenvectors."""
+    if (directory / "compact.json").is_file() and not (
+        directory / "eigensystem.h5"
+    ).is_file():
+        from turner2018_compact import load_compact_package
+
+        compact = load_compact_package(directory)
+        energies = compact["energies"]
+        observables = {
+            name: compact[name] for name in REQUIRED_OBSERVABLES
+        }
+        overlap_sum = float(np.sum(observables["overlap_z2"]))
+        if abs(overlap_sum - 0.5) > 1e-10:
+            raise RuntimeError(
+                f"Z2 overlap sum is invalid for L={compact['length']}: {overlap_sum}"
+            )
+        fsa_hamiltonian = observables["fsa_hamiltonian_sector"]
+        if not np.allclose(
+            fsa_hamiltonian, fsa_hamiltonian.T, atol=1e-12, rtol=0
+        ):
+            raise RuntimeError(
+                f"FSA Hamiltonian is not symmetric for L={compact['length']}"
+            )
+        fsa_energies, fsa_vectors = np.linalg.eigh(fsa_hamiltonian)
+        tower, tie_resolutions = match_independent_fsa_tower(
+            energies,
+            observables["exact_shell_amplitudes"],
+            fsa_vectors,
+            fsa_energies=fsa_energies,
+        )
+        sorted_tower = tower[np.argsort(energies[tower], kind="stable")]
+        trim = len(tower) // 6
+        special = sorted_tower[trim : len(tower) - trim if trim else len(tower)]
+        nonzero = np.abs(energies) > 1e-10
+        special = special[nonzero[special]]
+        other_mask = nonzero.copy()
+        other_mask[tower] = False
+        selected = {
+            "tower": tower,
+            "sorted_tower": sorted_tower,
+            "special": special,
+            "other": np.flatnonzero(other_mask),
+            "tie_resolutions": tie_resolutions,
+        }
+        pr2 = observables["participation_ratio"]
+        other_pr2 = float(np.mean(pr2[selected["other"]]))
+        special_pr2 = float(np.mean(pr2[selected["special"]]))
+        return {
+            **compact,
+            **observables,
+            "fsa_energies": fsa_energies,
+            "fsa_eigenvectors": fsa_vectors,
+            "fsa_overlap_z2": 0.5 * np.abs(fsa_vectors[0]) ** 2,
+            "selector": selected,
+            "pr2_other": other_pr2,
+            "pr2_special": special_pr2,
+            "overlap_sum": overlap_sum,
+        }
+
     from turner2018_l32_server import (
         _fingerprint_sha256,
         build_execution_fingerprint,
@@ -639,10 +705,124 @@ def _series_entry(
 
 
 def _configure_overlap_axis(panel: Any) -> None:
-    """Use the paper's log scale while leaving nonpositive values unplotted."""
-    panel.set_yscale("log", nonpositive="mask")
-    panel.set_xlabel("energy")
-    panel.set_ylabel(r"$|\langle E|Z_2\rangle|^2$")
+    """Apply the paper's explicit log10-overlap coordinate and ticks."""
+    panel.set_xlim(-20.0, 20.0)
+    panel.set_xticks([-20.0, -10.0, 0.0, 10.0, 20.0])
+    panel.set_ylim(-10.0, 0.0)
+    panel.set_yticks([-10.0, -8.0, -6.0, -4.0, -2.0, 0.0])
+    panel.set_xlabel("$E$")
+    panel.set_ylabel(r"$\log_{10}|\langle Z_2|\psi\rangle|^2$")
+
+
+def _paper_log_overlap(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    result = np.full(values.shape, np.nan, dtype=np.float64)
+    positive = values > 0.0
+    result[positive] = np.log10(values[positive])
+    return result
+
+
+def match_independent_fsa_tower(
+    energies: np.ndarray,
+    exact_shell_amplitudes: np.ndarray,
+    fsa_eigenvectors: np.ndarray,
+    *,
+    fsa_energies: np.ndarray,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    """Resolve only a symmetry-certified central particle-hole near-tie."""
+    energies = np.asarray(energies, dtype=np.float64)
+    amplitudes = np.asarray(exact_shell_amplitudes)
+    vectors = np.asarray(fsa_eigenvectors)
+    fsa_energies = np.asarray(fsa_energies, dtype=np.float64)
+    projection = np.abs(amplitudes.T @ vectors) ** 2
+    if (
+        energies.ndim != 1
+        or amplitudes.ndim != 2
+        or amplitudes.shape[1] != energies.size
+        or vectors.shape != (amplitudes.shape[0], amplitudes.shape[0])
+        or fsa_energies.shape != (amplitudes.shape[0],)
+        or not np.all(np.isfinite(projection))
+    ):
+        raise ValueError("independent FSA matching inputs are invalid")
+    tower = np.argmax(projection, axis=0)
+    resolutions: list[dict[str, Any]] = []
+    for fsa_index in range(projection.shape[1]):
+        order = np.argsort(projection[:, fsa_index], kind="stable")[::-1]
+        first, second = int(order[0]), int(order[1])
+        maximum = projection[first, fsa_index]
+        runner_up = projection[second, fsa_index]
+        tolerance = FSA_MATCH_TIE_ATOL + FSA_MATCH_TIE_RTOL * max(
+            abs(maximum), abs(runner_up)
+        )
+        if maximum - runner_up > tolerance:
+            continue
+        candidates = sorted((first, second), key=lambda index: energies[index])
+        negative, positive = candidates
+        if (
+            len(resolutions) > 0
+            or abs(fsa_energies[fsa_index]) > 1e-10
+            or energies[negative] >= 0.0
+            or energies[positive] <= 0.0
+            or not np.isclose(
+                energies[negative],
+                -energies[positive],
+                atol=1e-10,
+                rtol=1e-8,
+            )
+            or not np.allclose(
+                np.abs(amplitudes[:, negative]),
+                np.abs(amplitudes[:, positive]),
+                atol=1e-10,
+                rtol=1e-8,
+            )
+        ):
+            raise ValueError(
+                "FSA-to-exact projection has a tied or ambiguous column maximum"
+            )
+        tower[fsa_index] = negative
+        resolutions.append(
+            {
+                "fsa_index": fsa_index,
+                "policy": "particle-hole-pair-negative-representative",
+                "candidate_indices": [negative, positive],
+                "candidate_energies": [
+                    float(energies[negative]),
+                    float(energies[positive]),
+                ],
+            }
+        )
+    if len(np.unique(tower)) != amplitudes.shape[0]:
+        raise ValueError("FSA-to-exact matches are not one-to-one")
+    return np.asarray(tower, dtype=np.int64), resolutions
+
+
+def unfold_folded_shell_amplitudes(
+    folded_amplitudes: np.ndarray,
+    length: int,
+    *,
+    reflection_parity: int = 1,
+) -> np.ndarray:
+    """Unfold normalized inversion-sector amplitudes onto n=0,...,L."""
+    if isinstance(length, (bool, np.bool_)) or not isinstance(length, (int, np.integer)):
+        raise TypeError("length must be an even integer")
+    length = int(length)
+    if length < 2 or length % 2:
+        raise ValueError("length must be a positive even integer")
+    if reflection_parity not in (-1, 1):
+        raise ValueError("reflection_parity must be +1 or -1")
+    folded = np.asarray(folded_amplitudes)
+    expected = length // 2 + 1
+    if folded.ndim != 1 or folded.shape != (expected,):
+        raise ValueError(f"folded amplitudes must have shape ({expected},)")
+    if not np.all(np.isfinite(folded)):
+        raise ValueError("folded amplitudes must be finite")
+
+    half = length // 2
+    unfolded = np.empty(length + 1, dtype=folded.dtype)
+    unfolded[:half] = folded[:half] / np.sqrt(2.0)
+    unfolded[half] = folded[half]
+    unfolded[half + 1 :] = reflection_parity * unfolded[:half][::-1]
+    return unfolded
 
 
 @dataclass(frozen=True, slots=True)
@@ -661,7 +841,9 @@ class Fig3ShellPanelState(Mapping[str, Any]):
     fsa_nearest_gap: float
     full_fsa_shell_count: int
     plotted_folded_shell_count: int
+    displayed_full_shell_count: int
     folding: str
+    vertical_scale_factor: float
     exact_weight_sum: float
     fsa_weight_sum: float
     shell: tuple[int, ...]
@@ -707,7 +889,7 @@ def select_fig3_shell_panel_states(
     zero_tolerance: float = 1e-10,
     fsa_gap_tolerance: float = FSA_EIGENVALUE_GAP_TOLERANCE,
 ) -> tuple[Fig3ShellPanelState, Fig3ShellPanelState]:
-    """Select paper Fig. 3(b)(c) states and their folded-shell plot data."""
+    """Select paper Fig. 3(b)(c) states and full-shell plot data."""
     if isinstance(length, (bool, np.bool_)) or not isinstance(length, (int, np.integer)):
         raise TypeError("length must be an even integer")
     length = int(length)
@@ -777,14 +959,14 @@ def select_fig3_shell_panel_states(
     negative_positions = [
         index
         for index in range(tower.size)
-        if energy_values[tower[index]] < -zero_tolerance
+        if fsa_energies[index] < -zero_tolerance
     ]
     if not negative_positions:
         raise ValueError("matched tower has no negative state adjacent to zero")
     adjacent_position = min(
         negative_positions,
         key=lambda index: (
-            abs(energy_values[tower[index]]),
+            abs(fsa_energies[index]),
             int(tower[index]),
         ),
     )
@@ -805,28 +987,41 @@ def select_fig3_shell_panel_states(
             "degenerate selected FSA eigenvalue cannot define an individual curve"
         )
 
-    recomputed_tower = match_fsa_tower(amplitudes, fsa_vectors)
+    recomputed_tower, tie_resolutions = match_independent_fsa_tower(
+        energy_values,
+        amplitudes,
+        fsa_vectors,
+        fsa_energies=fsa_energies,
+    )
     if not np.array_equal(tower, recomputed_tower):
         raise ValueError("matched tower selector output is stale or inconsistent")
+    if matched_tower.get("tie_resolutions", []) != tie_resolutions:
+        raise ValueError("matched tower tie-resolution metadata is stale")
     if "sorted_tower" in matched_tower:
         expected_sorted = tower[np.argsort(energy_values[tower], kind="stable")]
         recorded_sorted = np.asarray(matched_tower["sorted_tower"])
         if not np.array_equal(recorded_sorted, expected_sorted):
             raise ValueError("matched tower sorted indices are stale or inconsistent")
 
-    shell = np.arange(plotted_shell_count, dtype=np.int64)
-    folding = "k=0 inversion-even: n and L-n are symmetry-related"
+    shell = np.arange(length + 1, dtype=np.int64)
+    folding = (
+        "normalized inversion-even amplitudes unfolded as "
+        "(|n>+|L-n>)/sqrt(2), with n=L/2 unchanged"
+    )
+    vertical_scale_factor = length / 2.0
 
     def panel_data(panel: str, role: str, fsa_index: int) -> Fig3ShellPanelState:
         exact_index = int(tower[fsa_index])
-        exact_weights = np.asarray(
-            np.abs(amplitudes[:, exact_index]) ** 2,
-            dtype=np.float64,
+        exact_full = unfold_folded_shell_amplitudes(
+            amplitudes[:, exact_index], length
         )
-        fsa_weights = np.asarray(
-            np.abs(fsa_vectors[:, fsa_index]) ** 2,
-            dtype=np.float64,
+        fsa_full = unfold_folded_shell_amplitudes(
+            fsa_vectors[:, fsa_index], length
         )
+        exact_probabilities = np.asarray(np.abs(exact_full) ** 2, dtype=np.float64)
+        fsa_probabilities = np.asarray(np.abs(fsa_full) ** 2, dtype=np.float64)
+        exact_weights = vertical_scale_factor * exact_probabilities
+        fsa_weights = vertical_scale_factor * fsa_probabilities
         if not np.all(np.isfinite(exact_weights)) or not np.all(
             np.isfinite(fsa_weights)
         ):
@@ -846,9 +1041,11 @@ def select_fig3_shell_panel_states(
             fsa_nearest_gap=float(nearest_gaps[fsa_index]),
             full_fsa_shell_count=length + 1,
             plotted_folded_shell_count=plotted_shell_count,
+            displayed_full_shell_count=length + 1,
             folding=folding,
-            exact_weight_sum=float(np.sum(exact_weights)),
-            fsa_weight_sum=float(np.sum(fsa_weights)),
+            vertical_scale_factor=vertical_scale_factor,
+            exact_weight_sum=float(np.sum(exact_probabilities)),
+            fsa_weight_sum=float(np.sum(fsa_probabilities)),
             shell=tuple(shell),
             exact_weights=tuple(exact_weights),
             fsa_weights=tuple(fsa_weights),
@@ -883,11 +1080,22 @@ def render_independent_fig3(
     arrays: dict[str, np.ndarray] = {}
     series: dict[str, dict[str, Any]] = {}
 
-    figure, axes = plt.subplots(2, 2, figsize=(11.0, 8.2))
-    panel_a, panel_b, panel_c, panel_d = axes.ravel()
+    figure = plt.figure(figsize=(11.0, 4.5), layout="constrained")
+    grid = figure.add_gridspec(
+        2,
+        3,
+        width_ratios=(1.15, 1.0, 1.0),
+        wspace=0.22,
+        hspace=0.12,
+    )
+    panel_a = figure.add_subplot(grid[:, 0])
+    panel_b = figure.add_subplot(grid[0, 1])
+    panel_c = figure.add_subplot(grid[1, 1])
+    panel_d = figure.add_subplot(grid[:, 2])
+    axes = np.asarray([[panel_a, panel_b], [panel_c, panel_d]], dtype=object)
     panel_a.scatter(
         primary["energies"],
-        primary["overlap_z2"],
+        _paper_log_overlap(primary["overlap_z2"]),
         s=9,
         alpha=0.55,
         color="tab:blue",
@@ -895,7 +1103,7 @@ def render_independent_fig3(
     )
     panel_a.scatter(
         primary["fsa_energies"],
-        primary["fsa_overlap_z2"],
+        _paper_log_overlap(primary["fsa_overlap_z2"]),
         marker="x",
         color="tab:red",
         label=f"independent FSA L={primary_length}",
@@ -949,10 +1157,11 @@ def render_independent_fig3(
     ):
         label = selection["panel"]
         shell = np.asarray(selection["shell"], dtype=np.int64)
+        paper_n = shell
         exact_weights = np.asarray(selection["exact_weights"], dtype=np.float64)
         fsa_weights = np.asarray(selection["fsa_weights"], dtype=np.float64)
         panel.plot(
-            shell,
+            paper_n,
             exact_weights,
             "o-",
             color="black",
@@ -960,20 +1169,27 @@ def render_independent_fig3(
             label="exact",
         )
         panel.plot(
-            shell,
+            paper_n,
             fsa_weights,
-            "x--",
+            "o-",
             color="red",
+            markersize=3,
             label="FSA",
         )
-        panel.set_title(
-            f"L={primary_length} {title}, E={selection['exact_energy']:.3f}"
-        )
-        panel.set_xlabel("folded FSA shell index n")
-        panel.set_ylabel("squared shell weight")
+        panel.set_xlim(0, primary_length)
+        panel.set_xticks(np.arange(0, primary_length + 1, 10))
+        panel.set_xlabel("n")
+        if label == "b":
+            panel.set_ylim(0.0, 4.2)
+            panel.set_yticks([0.0, 2.0, 4.0])
+        else:
+            panel.set_ylim(0.0, 2.1)
+            panel.set_yticks([0.0, 1.0, 2.0])
+        panel.set_ylabel(r"$(L/2)|\langle n|\psi\rangle|^2$")
         panel.legend(fontsize=8)
         for name, values in (
             ("shell", shell),
+            ("paper_n_coordinate", paper_n),
             ("exact_weights", exact_weights),
             ("fsa_weights", fsa_weights),
         ):
@@ -1066,7 +1282,7 @@ def render_independent_fig3(
         if primary_official is not None:
             panel_a.scatter(
                 primary_official["energies"],
-                primary_official["overlap"],
+                _paper_log_overlap(primary_official["overlap"]),
                 s=3,
                 alpha=0.3,
                 color="tab:orange",
@@ -1084,7 +1300,7 @@ def render_independent_fig3(
             official_by_length.setdefault(primary_length, {})["fsa"] = official_fsa
             panel_a.scatter(
                 official_fsa["energies"],
-                official_fsa["overlap"],
+                _paper_log_overlap(official_fsa["overlap"]),
                 marker="+",
                 color="black",
                 label=f"official FSA L={primary_length}",
@@ -1101,20 +1317,16 @@ def render_independent_fig3(
     panel_d.set_ylabel(r"$PR_2=\sum_\alpha |c_\alpha|^4$")
     panel_d.legend(fontsize=8)
     for label, panel in zip(("a", "b", "c", "d"), axes.ravel()):
-        x, y, horizontal_alignment = (
-            (0.98, 0.96, "right") if label == "c" else (0.02, 0.96, "left")
-        )
         panel.text(
-            x,
-            y,
+            0.02,
+            1.04,
             f"({label})",
             transform=panel.transAxes,
-            va="top",
-            ha=horizontal_alignment,
+            va="bottom",
+            ha="left",
             fontweight="bold",
+            clip_on=False,
         )
-    figure.tight_layout()
-
     per_length: dict[str, Any] = {}
     for length in lengths:
         result = results[int(length)]
@@ -1163,12 +1375,18 @@ def render_independent_fig3(
                 "shell_dimensions": list(result["exact_shell_amplitudes"].shape),
                 "full_fsa_shell_count": int(length) + 1,
                 "plotted_folded_shell_count": int(length) // 2 + 1,
+                "displayed_full_shell_count": int(length) + 1,
                 "folding": (
-                    "k=0 inversion-even: n and L-n are symmetry-related"
+                    "normalized inversion-even amplitudes unfolded as "
+                    "(|n>+|L-n>)/sqrt(2), with n=L/2 unchanged"
                 ),
-                "normalization_convention": "unit-norm projected shells",
+                "normalization_convention": (
+                    "unit-norm folded projections; paired amplitudes divided by "
+                    "sqrt(2), center unchanged; plotted by (L/2)|amplitude|^2"
+                ),
                 "sign_convention": "raw persisted real shell amplitudes",
                 "match_strengths": match_strengths.tolist(),
+                "tie_resolutions": selected.get("tie_resolutions", []),
                 "shell_amplitudes_sha256": hashlib.sha256(
                     result["exact_shell_amplitudes"].tobytes()
                 ).hexdigest(),
@@ -1247,21 +1465,29 @@ def render_independent_fig3(
         ),
         "plot_conventions": {
             "panel_a": {
-                "y_scale": "log",
-                "nonpositive": "masked",
+                "x_range": [-20.0, 20.0],
+                "x_ticks": [-20.0, -10.0, 0.0, 10.0, 20.0],
+                "y_coordinate": "log10(overlap)",
+                "y_range": [-10.0, 0.0],
+                "y_ticks": [-10.0, -8.0, -6.0, -4.0, -2.0, 0.0],
+                "nonpositive": "NaN-masked",
                 "stored_overlap_values": "unmodified",
             },
             "panel_b": {
                 "exact": "black circles, solid line",
-                "fsa": "red crosses, dashed line",
-                "x": "folded FSA shell index n=0..L/2",
-                "y": "squared shell weight, linear",
+                "fsa": "red circles, solid line",
+                "x": "full shell index n=0..L",
+                "displayed_points": "L+1",
+                "stored_independent_points": "L/2+1",
+                "y": "(L/2)*squared shell weight, linear, range 0..4.2, ticks 0,2,4",
             },
             "panel_c": {
                 "exact": "black circles, solid line",
-                "fsa": "red crosses, dashed line",
-                "x": "folded FSA shell index n=0..L/2",
-                "y": "squared shell weight, linear",
+                "fsa": "red circles, solid line",
+                "x": "full shell index n=0..L",
+                "displayed_points": "L+1",
+                "stored_independent_points": "L/2+1",
+                "y": "(L/2)*squared shell weight, linear, range 0..2.1, ticks 0,1,2",
             },
         },
         "series": series,
@@ -1443,14 +1669,14 @@ def run_figure(
     panel_a, panel_b, panel_c, panel_d = axes.ravel()
     panel_a.scatter(
         result["energies"],
-        result["overlap_z2"],
+        _paper_log_overlap(result["overlap_z2"]),
         s=9,
         alpha=0.5,
         label=f"ED L={length}",
     )
     panel_a.scatter(
         result["fsa_energies"],
-        result["fsa_overlap_z2"],
+        _paper_log_overlap(result["fsa_overlap_z2"]),
         marker="x",
         color="tab:blue",
         label=f"FSA L={length}",
@@ -1470,7 +1696,7 @@ def run_figure(
         official_scaling = load_fig3_pr2_scaling(official_data_dir)
         panel_a.scatter(
             official_energies,
-            official_overlap,
+            _paper_log_overlap(official_overlap),
             s=2,
             alpha=0.3,
             color="tab:orange",
@@ -1479,7 +1705,7 @@ def run_figure(
         )
         panel_a.scatter(
             official_fsa["energies"],
-            official_fsa["overlap"],
+            _paper_log_overlap(official_fsa["overlap"]),
             marker="x",
             color="black",
             label="official FSA L=32",
@@ -1525,15 +1751,21 @@ def run_figure(
             panel.plot(
                 shell,
                 fsa_weights,
-                "x--",
+                "o-",
                 color="red",
+                markersize=3,
                 label="FSA",
             )
-            panel.set_title(
-                f"L=32 {title}, E={selection['exact_energy']:.2f}"
-            )
-            panel.set_xlabel("folded FSA shell index n")
-            panel.set_ylabel("squared shell weight")
+            panel.set_xlim(0, 32)
+            panel.set_xticks([0, 10, 20, 30])
+            panel.set_xlabel("n")
+            if panel is panel_b:
+                panel.set_ylim(0.0, 4.2)
+                panel.set_yticks([0.0, 2.0, 4.0])
+            else:
+                panel.set_ylim(0.0, 2.1)
+                panel.set_yticks([0.0, 1.0, 2.0])
+            panel.set_ylabel(r"$(L/2)|\langle n|\psi\rangle|^2$")
             panel.legend(fontsize=8)
 
         plot_official_pr2_scaling(panel_d, official_scaling)
@@ -1578,17 +1810,15 @@ def run_figure(
     panel_d.set_ylabel(r"$PR_2=\sum_\alpha |c_\alpha|^4$")
     panel_d.legend(fontsize=8)
     for label, panel in zip(("a", "b", "c", "d"), axes.ravel()):
-        x, y, horizontal_alignment = (
-            (0.98, 0.96, "right") if label == "c" else (0.02, 0.96, "left")
-        )
         panel.text(
-            x,
-            y,
+            0.02,
+            1.04,
             f"({label})",
             transform=panel.transAxes,
-            va="top",
-            ha=horizontal_alignment,
+            va="bottom",
+            ha="left",
             fontweight="bold",
+            clip_on=False,
         )
     figure.tight_layout()
     path = output_dir / f"fig3_L{length}.png"

@@ -47,10 +47,15 @@ class TurnerL32PlanTests(unittest.TestCase):
         self.assertAlmostEqual(estimate["gb_per_dense_array"], 47.970672768)
 
     def test_plan_has_dense_estimates_for_all_production_lengths(self):
-        for length, dimension in ((28, 13_201), (30, 31_836), (32, 77_436)):
+        for length, dimension, driver in (
+            (28, 13_201, "evd"),
+            (30, 31_836, "evd"),
+            (32, 77_436, "evr"),
+        ):
             with self.subTest(length=length):
                 plan = build_plan(length, Path("."), [])
                 self.assertEqual(plan["basis"]["sector_dimension"], dimension)
+                self.assertEqual(plan["solver"]["driver"], driver)
                 self.assertGreater(plan["resources"]["minimum_requested_bytes"], 0)
 
     def test_execution_fingerprint_is_exact_and_checkout_scoped(self):
@@ -108,7 +113,7 @@ class TurnerL32PlanTests(unittest.TestCase):
             manifest = json.loads((Path(directory) / "manifest.json").read_text())
             self.assertEqual(manifest["readiness"], "ready")
             self.assertEqual(manifest["basis"]["sector_dimension"], 77_436)
-            self.assertEqual(manifest["solver"]["driver"], "evd")
+            self.assertEqual(manifest["solver"]["driver"], "evr")
             self.assertFalse(manifest["solver"]["check_finite"])
             self.assertTrue(manifest["solver"]["overwrite_a"])
             self.assertEqual(
@@ -361,12 +366,12 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                 figure_arrays = {}
                 if path == fig3_artifact:
                     figure_arrays = {
-                        "panel_b_L10_shell": np.arange(6),
-                        "panel_b_L10_exact_weights": np.full(6, 0.05),
-                        "panel_b_L10_fsa_weights": np.full(6, 1.0 / 6.0),
-                        "panel_c_L10_shell": np.arange(6),
-                        "panel_c_L10_exact_weights": np.full(6, 0.04),
-                        "panel_c_L10_fsa_weights": np.full(6, 1.0 / 6.0),
+                        "panel_b_L10_shell": np.arange(11),
+                        "panel_b_L10_exact_weights": np.full(11, 1.5 / 11.0),
+                        "panel_b_L10_fsa_weights": np.full(11, 5.0 / 11.0),
+                        "panel_c_L10_shell": np.arange(11),
+                        "panel_c_L10_exact_weights": np.full(11, 1.2 / 11.0),
+                        "panel_c_L10_fsa_weights": np.full(11, 5.0 / 11.0),
                     }
                 np.savez(
                     path.with_suffix(".npz"),
@@ -409,8 +414,11 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                             "zero_tolerance": 1e-10,
                             "full_fsa_shell_count": 11,
                             "plotted_folded_shell_count": 6,
+                            "displayed_full_shell_count": 11,
+                            "vertical_scale_factor": 5.0,
                             "folding": (
-                                "k=0 inversion-even: n and L-n are symmetry-related"
+                                "normalized inversion-even amplitudes unfolded as "
+                                "(|n>+|L-n>)/sqrt(2), with n=L/2 unchanged"
                             ),
                             "exact_weight_sum": 0.3,
                             "fsa_weight_sum": 1.0,
@@ -426,8 +434,11 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                             "zero_tolerance": 1e-10,
                             "full_fsa_shell_count": 11,
                             "plotted_folded_shell_count": 6,
+                            "displayed_full_shell_count": 11,
+                            "vertical_scale_factor": 5.0,
                             "folding": (
-                                "k=0 inversion-even: n and L-n are symmetry-related"
+                                "normalized inversion-even amplitudes unfolded as "
+                                "(|n>+|L-n>)/sqrt(2), with n=L/2 unchanged"
                             ),
                             "exact_weight_sum": 0.24,
                             "fsa_weight_sum": 1.0,
@@ -440,9 +451,17 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                             "plot_conventions": {
                                 panel: {
                                     "exact": "black circles, solid line",
-                                    "fsa": "red crosses, dashed line",
-                                    "x": "folded FSA shell index n=0..L/2",
-                                    "y": "squared shell weight, linear",
+                                    "fsa": "red circles, solid line",
+                                    "x": "full shell index n=0..L",
+                                    "displayed_points": "L+1",
+                                    "stored_independent_points": "L/2+1",
+                                    "y": (
+                                        "(L/2)*squared shell weight, linear, range "
+                                        "0..4.2, ticks 0,2,4"
+                                        if panel == "panel_b"
+                                        else "(L/2)*squared shell weight, linear, "
+                                        "range 0..2.1, ticks 0,1,2"
+                                    ),
                                 }
                                 for panel in ("panel_b", "panel_c")
                             },
@@ -596,8 +615,11 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                                     "zero_tolerance": 1e-10,
                                     "full_fsa_shell_count": 11,
                                     "plotted_folded_shell_count": 6,
+                                    "displayed_full_shell_count": 11,
+                                    "vertical_scale_factor": 5.0,
                                     "folding": (
-                                        "k=0 inversion-even: n and L-n are symmetry-related"
+                                        "normalized inversion-even amplitudes unfolded "
+                                        "as (|n>+|L-n>)/sqrt(2), with n=L/2 unchanged"
                                     ),
                                     "exact_weight_sum": 0.3,
                                     "fsa_weight_sum": 1.0,
@@ -613,8 +635,11 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                                     "zero_tolerance": 1e-10,
                                     "full_fsa_shell_count": 11,
                                     "plotted_folded_shell_count": 6,
+                                    "displayed_full_shell_count": 11,
+                                    "vertical_scale_factor": 5.0,
                                     "folding": (
-                                        "k=0 inversion-even: n and L-n are symmetry-related"
+                                        "normalized inversion-even amplitudes unfolded "
+                                        "as (|n>+|L-n>)/sqrt(2), with n=L/2 unchanged"
                                     ),
                                     "exact_weight_sum": 0.24,
                                     "fsa_weight_sum": 1.0,
@@ -623,9 +648,17 @@ class TurnerRestartWorkflowTests(unittest.TestCase):
                             "plot_conventions": {
                                 panel: {
                                     "exact": "black circles, solid line",
-                                    "fsa": "red crosses, dashed line",
-                                    "x": "folded FSA shell index n=0..L/2",
-                                    "y": "squared shell weight, linear",
+                                    "fsa": "red circles, solid line",
+                                    "x": "full shell index n=0..L",
+                                    "displayed_points": "L+1",
+                                    "stored_independent_points": "L/2+1",
+                                    "y": (
+                                        "(L/2)*squared shell weight, linear, range "
+                                        "0..4.2, ticks 0,2,4"
+                                        if panel == "panel_b"
+                                        else "(L/2)*squared shell weight, linear, "
+                                        "range 0..2.1, ticks 0,1,2"
+                                    ),
                                 }
                                 for panel in ("panel_b", "panel_c")
                             },

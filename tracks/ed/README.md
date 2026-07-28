@@ -136,6 +136,19 @@ Use a separate output directory for the time-step convergence run:
   --output-dir tracks/ed/results/turner-2018/fig2-itebd-dt0025
 ```
 
+For LASG02 resumes after explicitly migrating checkpoints into the separate
+directory, select both the timestep and output directory:
+
+```bash
+TURNER_ITEBD_STATE=Z2 \
+TURNER_ITEBD_DT=0.025 \
+TURNER_OUTPUT_DIR=/public/home/student090/results/fig2-itebd-dt0025 \
+sbatch scripts/turner2018_itebd_lasg02.sbatch
+```
+
+The runner still defaults to dt=0.05; this opt-in does not change existing dt=0.05 jobs.
+It rejects `dt=0.025` if the original dt=0.05 output directory is selected.
+
 Generated arrays and figures are written below
 `tracks/ed/results/turner-2018/` and are intentionally gitignored. For small
 systems, Fig. 4 uses a lower-half bulk window with the center excluded; it
