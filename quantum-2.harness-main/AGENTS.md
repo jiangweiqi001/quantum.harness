@@ -148,6 +148,12 @@ parameter, and Hermiticity validation before treating a result as valid.
 - Method-level skills: `skills/method-*/SKILL.md` — method insight and tool-skill selection for challenge tracks.
 - Software stack skills: `skills/<stack>/SKILL.md` with machine-readable setup in `skills/<stack>/stack.toml`.
 - Cluster profiles: `skills/using-slurm/profiles/` — per-cluster defaults (partitions, sbatch idioms, modules) consulted by cluster-aware skills via `skills/using-slurm/profiles/active.toml` symlink or `HARNESS_CLUSTER_PROFILE=<name>` env var. Skills stay cluster-agnostic; cluster specifics live in profile cards.
+- Experiment workflow: `skills/experiment/SKILL.md` — orchestrates the six-phase
+  numerical experiment lifecycle (MVP → Verify → Smoke → Refactor → Organize →
+  Scan). Each phase is independently invocable: `/experiment-mvp`,
+  `/experiment-verify`, `/experiment-smoke`, `/experiment-refactor`,
+  `/experiment-organize`, `/experiment-scan`. State tracked in
+  `tracks/<track>/experiment.json`.
 
 ## Ion skill management
 
