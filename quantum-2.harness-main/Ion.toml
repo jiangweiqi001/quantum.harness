@@ -1,0 +1,85 @@
+[options]
+skills-dir = "skills"
+
+[skills]
+# Research workflow
+arxiv-search = { source = "yorkeccak/scientific-skills/arxiv-search" }
+survey = { source = "QuantumBFS/sci-brain/skills/survey" }  # topic survey → .knowledge/ base (BibTeX)
+brainstorm-ideas = { source = "QuantumBFS/sci-brain/skills/brainstorm-ideas" }  # two-agent brainstorm grounded in a survey (for /challenge)
+idea-writer = { source = "QuantumBFS/sci-brain/skills/idea-writer" }  # write a chosen idea into a structured proposal (for /challenge)
+download-ref = { type = "local" }
+
+# Problem-solving primitives (generic; topic-agnostic)
+parameter-scan = { type = "local" }     # multi-axis sweeps (subsumes finite-size-scan)
+scaling-fit = { type = "local" }
+cross-method-check = { type = "local" }
+using-slurm = { type = "local" }        # cluster mechanism (agent-does-ssh)
+cluster-jobs = { type = "local" }       # student-facing safe submit/manage/download (preview+confirm)
+setup-cluster = { type = "local" }      # build unified TOML profile + probe resources + seed safety limits
+setup-julia = { type = "local" }        # Julia install + mirror + project env (local or remote)
+reproduce-paper = { type = "local" }    # beginner-facing paper reproduction (brainstorm-first)
+beginner-training = { type = "local" }  # 5-track guided training; Track 2 absorbs the old track-starter flow
+report = { type = "local" }             # render report.json into a self-contained HTML report (stdlib only)
+explore-on-project-knowledge = { type = "local" }
+
+# Skill tooling
+ion-cli = { type = "local" }
+
+# Software stacks
+context7-cli = { source = "upstash/context7/skills/context7-cli" }
+find-docs = { type = "local" }
+using-xdiag = { type = "local" }
+using-quspin = { type = "local" }
+using-itensors = { type = "local" }
+using-mpskit = { type = "local" }        # infinite MPS
+using-tenpy = { type = "local" }         # Python tensor network package
+using-netket = { type = "local" }
+using-jax = { type = "local" }
+using-tensorcircuit-ng = { type = "local" }
+using-pepskit = { type = "local" }
+using-sse = { type = "local" }
+using-cpmc-lab = { type = "local" }
+using-quantum-espresso = { type = "local" }   # Quantum ESPRESSO: DFPT electron-phonon / Tc + pw2qmcpack orbital generation
+using-qmcpack = { type = "local" }            # QMCPACK Slater-Jastrow VMC/DMC for plane-wave solids
+using-nctssos = { type = "local" }       # general NC-polyopt engine (Clarabel/Mosek)
+using-qmbcertify = { type = "local" }    # structured-NPA certifier for 1D/2D Heisenberg (Mosek)
+
+# Method-level guidance
+method-ed = { type = "local" }
+method-mps = { type = "local" }
+method-peps = { type = "local" }
+method-qmc = { type = "local" }
+method-dfpt = { type = "local" }         # DFPT electron-phonon superconductivity (native PHonon route)
+method-ltrg = { type = "local" }
+method-vmc = { type = "local" }
+method-qcs = { type = "local" }
+method-mf = { type = "local" }
+method-polyopt = { type = "local" }
+
+# UX
+onboard = { type = "local" }
+solve = { type = "local" }
+challenge = { type = "local" }   # post-reproduction challenge journey: ideate → help-desk go/no-go → attempt → /challenge-report
+challenge-report = { type = "local" }   # challenge completion report
+
+# Problem dispatchers (auto-triggered; read cards under .knowledge/{models,physics}/<name>/)
+model = { type = "local" }
+physics = { type = "local" }
+
+# Superpowers (general-purpose dev workflow: brainstorming, debugging, plans, reviews)
+receiving-code-review = { source = "obra/superpowers/skills/receiving-code-review" }
+requesting-code-review = { source = "obra/superpowers/skills/requesting-code-review" }
+using-git-worktrees = { source = "obra/superpowers/skills/using-git-worktrees" }
+brainstorming = { source = "obra/superpowers/skills/brainstorming" }
+dispatching-parallel-agents = { source = "obra/superpowers/skills/dispatching-parallel-agents" }
+executing-plans = { source = "obra/superpowers/skills/executing-plans" }
+finishing-a-development-branch = { source = "obra/superpowers/skills/finishing-a-development-branch" }
+subagent-driven-development = { source = "obra/superpowers/skills/subagent-driven-development" }
+systematic-debugging = { source = "obra/superpowers/skills/systematic-debugging" }
+test-driven-development = { source = "obra/superpowers/skills/test-driven-development" }
+using-superpowers = { source = "obra/superpowers/skills/using-superpowers" }
+verification-before-completion = { source = "obra/superpowers/skills/verification-before-completion" }
+writing-plans = { source = "obra/superpowers/skills/writing-plans" }
+writing-skills = { source = "obra/superpowers/skills/writing-skills" }
+scientific-visualization = { source = "HughYau/AcademicForge/scientific-visualization" }
+build-apptainer-image = { type = "local", path = "skills/build-apptainer-image" }
