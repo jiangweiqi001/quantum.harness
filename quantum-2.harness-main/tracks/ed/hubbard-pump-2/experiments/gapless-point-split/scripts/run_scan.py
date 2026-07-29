@@ -420,8 +420,8 @@ def main():
 
         # --- Refine ---
         if args.mode in ("refine", "auto"):
-            coarse_path = base_out / "coarse" / \
-                f"gaps_U{U:.3f}.npz".replace(".", "p")
+            tag = f"U{U:.3f}".replace(".", "p")
+            coarse_path = base_out / "coarse" / f"gaps_{tag}.npz"
             if not coarse_path.exists():
                 print(f"  ERROR: coarse scan not found at {coarse_path}")
                 print(f"  Run with --mode coarse first.")
@@ -432,8 +432,8 @@ def main():
 
             # Save refined minima summary
             if refined:
-                summary_path = base_out / "refine" / \
-                    f"minima_U{U:.3f}.csv".replace(".", "p")
+                tag = f"U{U:.3f}".replace(".", "p")
+                summary_path = base_out / "refine" / f"minima_{tag}.csv"
                 summary_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(summary_path, "w") as fh:
                     fh.write("index,delta,Delta,gap,hessian_eigval_0,"
