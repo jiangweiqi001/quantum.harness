@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+results/logs/
+results/grid_data/
+.superpowers/
