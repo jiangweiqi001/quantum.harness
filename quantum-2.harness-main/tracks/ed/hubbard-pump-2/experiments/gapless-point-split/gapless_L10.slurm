@@ -1,41 +1,40 @@
 #!/bin/bash
 #SBATCH --job-name=gapsplit_L10
-#SBATCH --output=gsplit_L10_%A_%a.out
-#SBATCH --error=gsplit_L10_%A_%a.err
+#SBATCH --output=gsplit_L10_%j.out
+#SBATCH --error=gsplit_L10_%j.err
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=24G
-#SBATCH --time=08:00:00
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=32G
+#SBATCH --time=12:00:00
 #SBATCH --partition=xhacnormalb
-#SBATCH --array=0-3
 
-# gapless-point-split L=10: sparse ED, 31×41 grid
-# Array task 0 → U=0.0, 1 → U=0.2, 2 → U=0.5, 3 → U=1.0
-# ~2-5h per task
+# Single job for all L=10 U values — no array, no chunking
+# 4 U values, 31×41=1271 points each, ~1-3h each
 
-U_VALUES=(0.0 0.2 0.5 1.0)
-U=${U_VALUES[$SLURM_ARRAY_TASK_ID]}
-
-echo "=== gapless-point-split L=10  U=$U ==="
+echo "=== gapless-point-split L=10 ==="
 echo "Job ID:    $SLURM_JOB_ID"
-echo "Task:      $SLURM_ARRAY_TASK_ID / $SLURM_ARRAY_TASK_COUNT"
 echo "Node:      $SLURMD_NODENAME"
 echo "Start:     $(date)"
 echo
 
 source /work/home/mazhuijing/ed-project/.venv/bin/activate
 
-export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
 
 cd "$SLURM_SUBMIT_DIR" || exit 1
 echo "PWD: $(pwd)"
 echo "Python: $(which python3)"
 echo
 
-python3 experiments/gapless-point-split/scripts/run_scan.py \
-    --config experiments/gapless-point-split/configs/coarse_L10.yaml \
-    --mode auto --U "$U"
+for U in 0.0 0.2 0.5 1.0; do
+    echo "--- U=$U ---"
+    python3 experiments/gapless-point-split/scripts/run_scan.py \
+        --config experiments/gapless-point-split/configs/coarse_L10.yaml \
+        --mode auto --U "$U"
+done
 
 echo
 echo "End: $(date)"

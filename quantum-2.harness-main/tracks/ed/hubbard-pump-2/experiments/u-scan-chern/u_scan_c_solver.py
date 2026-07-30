@@ -33,8 +33,9 @@ from quspin.operators import hamiltonian
 # ---------------------------------------------------------------------------
 # Reuse the validated FHS machinery from the existing U=0 Chern experiment
 # ---------------------------------------------------------------------------
-_PARENT = Path(__file__).resolve().parent
-sys.path.insert(0, str(_PARENT))
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_IMPORT_PATH = _PROJECT_ROOT / "rice-mele-chern"
+sys.path.insert(0, str(_IMPORT_PATH))
 from run_rice_mele_chern import (  # noqa: E402
     FHSDiagnostics,
     compute_fhs,
@@ -348,7 +349,7 @@ class RiceMeleHubbardSolver:
 # U-scan orchestration
 # ===========================================================================
 
-RESULTS = _PARENT / "results"
+RESULTS = _PROJECT_ROOT / "results" / "u-scan-chern"
 BERRY_DIR = RESULTS / "berry_curvature"
 FIG_DIR = RESULTS / "figures"
 

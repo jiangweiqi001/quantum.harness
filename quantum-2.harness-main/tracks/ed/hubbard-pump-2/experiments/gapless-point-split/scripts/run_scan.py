@@ -25,7 +25,12 @@ sys.path.insert(0, str(_RMH_GAP))
 
 from src.gaps import GapPointResult, solve_point  # noqa: E402
 
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeoutError  # noqa: E402
+
 RESULTS_ROOT = _PROJECT.parent.parent / "results" / "gapless-point-split"
+
+# Per-point timeout for sparse solver (seconds), 0 = no timeout
+POINT_TIMEOUT = 120
 
 
 # ---------------------------------------------------------------------------
@@ -191,62 +196,78 @@ def _cluster_minima(candidates: list[dict], d_delta: float, d_Delta: float,
 
 def scan_coarse_grid(L: int, U: float, delta_grid: np.ndarray,
                      Delta_grid: np.ndarray, out_dir: Path,
-                     method: str = "auto") -> Path:
-    """Scan the full coarse grid for one (L, U) and save results.
+                     method: str = "auto",
+                     start_idx: int | None = None,
+                     end_idx: int | None = None) -> Path:
+    """Scan a coarse grid chunk for one (L, U) and save results.
 
+    If start_idx/end_idx are None, scans the full grid.
     Returns path to the saved NPZ file.
     """
     n_d = len(delta_grid)
     n_D = len(Delta_grid)
     n_total = n_d * n_D
+
+    if start_idx is None:
+        start_idx = 0
+    if end_idx is None:
+        end_idx = n_total
+    is_chunk = (start_idx != 0) or (end_idx != n_total)
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Allocate arrays
+    # Allocate arrays (full-sized for merging simplicity)
     Delta_c_map = np.full((n_d, n_D), np.nan)
     Delta_s_map = np.full((n_d, n_D), np.nan)
     Delta_MB_map = np.full((n_d, n_D), np.nan)
     E0_map = np.full((n_d, n_D), np.nan)
 
-    print(f"  Grid: {n_d}×{n_D} = {n_total} points  method={method}")
+    n_chunk = end_idx - start_idx
+    tag = f"U{U:.3f}".replace(".", "p")
+    if is_chunk:
+        out_path = out_dir / f"gaps_{tag}_chunk{start_idx:04d}_{end_idx:04d}.npz"
+    else:
+        out_path = out_dir / f"gaps_{tag}.npz"
+    print(f"  Grid: {n_d}×{n_D} = {n_total} points  "
+          f"chunk [{start_idx}, {end_idx}) = {n_chunk} points  method={method}")
+    progress_file = out_dir / f"progress_{tag}_{start_idx:04d}.txt"
     t_start = time.perf_counter()
     n_ok = 0
     n_fail = 0
 
-    for idx_d in range(n_d):
+    for flat_idx in range(start_idx, end_idx):
+        idx_d = flat_idx // n_D
+        idx_D = flat_idx % n_D
         delta = float(delta_grid[idx_d])
-        for idx_D in range(n_D):
-            Dv = float(Delta_grid[idx_D])
-            flat_idx = idx_d * n_D + idx_D
+        Dv = float(Delta_grid[idx_D])
 
-            try:
-                r = solve_point(L=L, delta=delta, Delta=Dv, U=U, method=method)
-                Delta_c_map[idx_d, idx_D] = r.Delta_c
-                Delta_s_map[idx_d, idx_D] = r.Delta_s
-                Delta_MB_map[idx_d, idx_D] = r.Delta_MB
-                E0_map[idx_d, idx_D] = r.E0_half
-                n_ok += 1
-            except Exception as exc:
-                n_fail += 1
-                if n_fail <= 5:
-                    print(f"    FAIL δ={delta:+.4f} Δ={Dv:+.4f}: {exc}")
+        try:
+            r = solve_point(L=L, delta=delta, Delta=Dv, U=U, method=method)
+            Delta_c_map[idx_d, idx_D] = r.Delta_c
+            Delta_s_map[idx_d, idx_D] = r.Delta_s
+            Delta_MB_map[idx_d, idx_D] = r.Delta_MB
+            E0_map[idx_d, idx_D] = r.E0_half
+            n_ok += 1
+        except Exception as exc:
+            n_fail += 1
+            if n_fail <= 5:
+                print(f"    FAIL δ={delta:+.4f} Δ={Dv:+.4f}: {exc}", flush=True)
 
-            if (flat_idx + 1) % max(1, n_total // 20) == 0:
-                pct = (flat_idx + 1) / n_total * 100
-                elapsed = time.perf_counter() - t_start
-                eta = elapsed / (flat_idx + 1) * (n_total - flat_idx - 1)
-                print(f"    {pct:.0f}% ({flat_idx+1}/{n_total})  "
-                      f"elapsed={elapsed:.0f}s  ETA={eta:.0f}s")
+        done_in_chunk = flat_idx - start_idx + 1
+        if done_in_chunk % max(1, n_chunk // 10) == 0:
+            pct = done_in_chunk / n_chunk * 100
+            elapsed = time.perf_counter() - t_start
+            eta = elapsed / done_in_chunk * (n_chunk - done_in_chunk)
+            msg = (f"    {pct:.0f}% ({done_in_chunk}/{n_chunk})  "
+                   f"elapsed={elapsed:.0f}s  ETA={eta:.0f}s")
+            print(msg, flush=True)
+            # Also write to progress file for SLURM reliability
+            progress_file.write_text(msg + "\n")
 
     elapsed = time.perf_counter() - t_start
-    valid_mask = ~np.isnan(Delta_c_map)
-    print(f"  Done: {n_ok} OK, {n_fail} failed, {elapsed:.0f}s")
-    if n_ok > 0:
-        print(f"  Δc: min={np.min(Delta_c_map[valid_mask]):.6f}  "
-              f"max={np.max(Delta_c_map[valid_mask]):.4f}")
+    print(f"  Done: {n_ok} OK, {n_fail} failed, {elapsed:.0f}s", flush=True)
 
-    # Save
-    tag = f"U{U:.3f}".replace(".", "p")
-    out_path = out_dir / f"gaps_{tag}.npz"
+    # Final save
     np.savez_compressed(
         out_path,
         delta_values=delta_grid,
@@ -257,12 +278,93 @@ def scan_coarse_grid(L: int, U: float, delta_grid: np.ndarray,
         E0_half=E0_map,
         L=np.array([L]),
         U=np.array([U]),
+        start_idx=np.array([start_idx]),
+        end_idx=np.array([end_idx]),
         wall_time_s=np.array([elapsed]),
         n_ok=np.array([n_ok]),
         n_fail=np.array([n_fail]),
     )
-    print(f"  Saved: {out_path}")
+    print(f"  Saved: {out_path}", flush=True)
     return out_path
+
+
+# ---------------------------------------------------------------------------
+# Chunk merging
+# ---------------------------------------------------------------------------
+
+def merge_chunks(coarse_dir: Path, tag: str) -> Path:
+    """Merge chunk NPZ files into a single full-grid NPZ.
+
+    Returns path to the merged file.
+    """
+    chunks = sorted(coarse_dir.glob(f"gaps_{tag}_chunk*.npz"))
+    if not chunks:
+        raise FileNotFoundError(f"No chunk files found for {tag} in {coarse_dir}")
+
+    # Load first chunk for grid metadata
+    first = np.load(chunks[0], allow_pickle=False)
+    merged_path = coarse_dir / f"gaps_{tag}.npz"
+
+    # If only one chunk, just rename
+    if len(chunks) == 1:
+        merged_path.unlink(missing_ok=True)
+        chunks[0].rename(merged_path)
+        print(f"  Merged (single chunk): {merged_path}")
+        return merged_path
+
+    delta_grid = first["delta_values"]
+    Delta_grid = first["Delta_values"]
+    L_val = int(first["L"][0])
+    U_val = float(first["U"][0])
+
+    n_d = len(delta_grid)
+    n_D = len(Delta_grid)
+    Delta_c = np.full((n_d, n_D), np.nan)
+    Delta_s = np.full((n_d, n_D), np.nan)
+    Delta_MB = np.full((n_d, n_D), np.nan)
+    E0_half = np.full((n_d, n_D), np.nan)
+    total_ok = 0
+    total_fail = 0
+    total_time = 0.0
+
+    for chunk_path in chunks:
+        data = np.load(chunk_path, allow_pickle=False)
+        # Merge: fill in non-NaN values
+        mask = ~np.isnan(data["Delta_c"])
+        Delta_c[mask] = data["Delta_c"][mask]
+        Delta_s[mask] = data["Delta_s"][mask]
+        Delta_MB[mask] = data["Delta_MB"][mask]
+        E0_half[mask] = data["E0_half"][mask]
+        total_ok += int(data["n_ok"][0])
+        total_fail += int(data["n_fail"][0])
+        total_time += float(data["wall_time_s"][0])
+
+    np.savez_compressed(
+        merged_path,
+        delta_values=delta_grid,
+        Delta_values=Delta_grid,
+        Delta_c=Delta_c,
+        Delta_s=Delta_s,
+        Delta_MB=Delta_MB,
+        E0_half=E0_half,
+        L=np.array([L_val]),
+        U=np.array([U_val]),
+        wall_time_s=np.array([total_time]),
+        n_ok=np.array([total_ok]),
+        n_fail=np.array([total_fail]),
+    )
+
+    valid_mask = ~np.isnan(Delta_c)
+    n_ok = np.sum(valid_mask)
+    print(f"  Merged {len(chunks)} chunks → {merged_path}")
+    print(f"  {n_ok}/{n_d*n_D} points, Δc: min={np.min(Delta_c[valid_mask]):.6f}  "
+          f"max={np.max(Delta_c[valid_mask]):.4f}")
+
+    # Clean up chunks
+    for chunk_path in chunks:
+        chunk_path.unlink()
+
+    return merged_path
 
 
 # ---------------------------------------------------------------------------
@@ -285,10 +387,16 @@ def refine_minima(L: int, U: float, coarse_path: Path, cfg: dict,
     Delta_grid = data["Delta_values"]
     Delta_c = data["Delta_c"]
 
-    # Detect minima
+    # Detect minima — use adaptive eps: at least 20% above the global minimum
+    eps_configured = ref_cfg["eps"]
+    global_min = float(np.nanmin(Delta_c))
+    eps_effective = max(eps_configured, global_min * 1.2)
+    if eps_effective > eps_configured:
+        print(f"  Adaptive eps: {eps_configured:.4f} → {eps_effective:.4f} "
+              f"(Δc_min = {global_min:.4f})")
     minima = detect_local_minima(
         delta_grid, Delta_grid, Delta_c,
-        eps=ref_cfg["eps"],
+        eps=eps_effective,
         merge_distance=ref_cfg["merge_distance"],
     )
     print(f"  Detected {len(minima)} candidate minima:")
@@ -367,12 +475,16 @@ def main():
         description="Charge gapless point scan — RMH model at small U")
     parser.add_argument("--config", required=True, help="YAML config file")
     parser.add_argument("--mode", default="auto",
-                        choices=["coarse", "refine", "auto"],
+                        choices=["coarse", "refine", "auto", "merge"],
                         help="Scan mode (default: auto = coarse + refine)")
     parser.add_argument("--U", type=float, default=None,
                         help="Single U value (overrides config U_list)")
     parser.add_argument("--U-only", type=float, nargs="*", default=None,
                         help="Specific U values to run (overrides config)")
+    parser.add_argument("--task-id", type=int, default=None,
+                        help="SLURM array task ID (0-indexed)")
+    parser.add_argument("--task-count", type=int, default=1,
+                        help="Total number of array tasks")
     args = parser.parse_args()
 
     # Load config
@@ -393,6 +505,17 @@ def main():
     delta_grid, Delta_grid = build_grid(cfg)
     base_out = RESULTS_ROOT / f"L{L}"
 
+    n_total = len(delta_grid) * len(Delta_grid)
+    chunk_size = (n_total + args.task_count - 1) // args.task_count
+    start_idx = args.task_id * chunk_size if args.task_id is not None else 0
+    end_idx = min(start_idx + chunk_size, n_total) if args.task_id is not None else n_total
+    is_chunk = (args.task_id is not None)
+
+    if is_chunk:
+        task_tag = f"task {args.task_id}/{args.task_count}"
+    else:
+        task_tag = "single"
+
     print("=" * 64)
     print(f"GAPLESS POINT SPLIT SCAN")
     print(f"  L = {L}")
@@ -401,13 +524,40 @@ def main():
           f"n={len(delta_grid)}")
     print(f"  Δ ∈ [{Delta_grid[0]:.2f}, {Delta_grid[-1]:.2f}]  "
           f"n={len(Delta_grid)}")
-    print(f"  mode = {args.mode}  method = {method}")
+    print(f"  mode = {args.mode}  method = {method}  {task_tag}")
+    print(f"  chunk: [{start_idx}, {end_idx}) = {end_idx - start_idx} points")
     print(f"  results → {base_out}")
     print("=" * 64)
 
     t_total = time.perf_counter()
 
     for U in U_list:
+        tag = f"U{U:.3f}".replace(".", "p")
+
+        if args.mode == "merge":
+            # Merge chunks for this U, then refine if Auto was requested
+            coarse_dir = base_out / "coarse"
+            print(f"\n{'─' * 48}")
+            print(f"MERGE U = {U:.3f}")
+            print(f"{'─' * 48}")
+            merged_path = merge_chunks(coarse_dir, tag)
+            # After merge, optionally refine
+            refine_dir = base_out / "refine"
+            refined = refine_minima(L, U, merged_path, cfg, refine_dir)
+            if refined:
+                summary_path = base_out / "refine" / f"minima_{tag}.csv"
+                summary_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(summary_path, "w") as fh:
+                    fh.write("index,delta,Delta,gap,hessian_eigval_0,"
+                             "hessian_eigval_1\n")
+                    for k, m in enumerate(refined):
+                        fh.write(f"{k},{m['delta']:.8f},{m['Delta']:.8f},"
+                                 f"{m['gap']:.8f},"
+                                 f"{m['hessian_eigvals'][0]:.6f},"
+                                 f"{m['hessian_eigvals'][1]:.6f}\n")
+                print(f"  Minima summary: {summary_path}")
+            continue
+
         print(f"\n{'─' * 48}")
         print(f"U = {U:.3f}")
         print(f"{'─' * 48}")
@@ -415,12 +565,12 @@ def main():
         # --- Coarse scan ---
         if args.mode in ("coarse", "auto"):
             coarse_dir = base_out / "coarse"
-            coarse_path = scan_coarse_grid(
-                L, U, delta_grid, Delta_grid, coarse_dir, method=method)
+            scan_coarse_grid(
+                L, U, delta_grid, Delta_grid, coarse_dir, method=method,
+                start_idx=start_idx, end_idx=end_idx)
 
-        # --- Refine ---
-        if args.mode in ("refine", "auto"):
-            tag = f"U{U:.3f}".replace(".", "p")
+        # --- Refine (only in single-task mode, not for chunks) ---
+        if args.mode in ("refine", "auto") and not is_chunk:
             coarse_path = base_out / "coarse" / f"gaps_{tag}.npz"
             if not coarse_path.exists():
                 print(f"  ERROR: coarse scan not found at {coarse_path}")
@@ -432,7 +582,6 @@ def main():
 
             # Save refined minima summary
             if refined:
-                tag = f"U{U:.3f}".replace(".", "p")
                 summary_path = base_out / "refine" / f"minima_{tag}.csv"
                 summary_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(summary_path, "w") as fh:
