@@ -1,14 +1,16 @@
 # Rice-Mele-Hubbard Pump ED
 
-This is one structured exact-diagonalization project for the interacting
+This is the canonical structured exact-diagonalization project for the interacting
 spinful Rice-Mele pump in `36.md`. It computes and compares
 
 ```text
 C_MB, Delta_min, Q_adiabatic, Q_real_time(T).
 ```
 
-The project has one Hamiltonian implementation, one CLI, and no nested
-standalone project.
+The production workflow has one Hamiltonian implementation, one CLI, and no
+nested standalone project. Historical and extension experiments imported from
+the partner tree live under `experiments/`; they are explicitly isolated from
+the canonical solver and documented in `experiments/README.md`.
 
 ## Model and conventions
 
@@ -55,12 +57,31 @@ hubbard-pump/
 |-- cluster/launch.sh         # retrying run controller
 |-- cluster/worker.slurm      # one static/refine/realtime array task
 |-- cluster/scan_u.slurm      # small legacy scan wrapper
+|-- experiments/               # imported, auditable extension families
 |-- results/
 `-- requirements.txt
 ```
 
 `src/` contains source modules only. Scripts never define Hamiltonian terms or
 numerical solvers.
+
+## Imported experiments and result merge
+
+The partner tree was fetched from commit `9ebcab9` and merged under
+`experiments/` without replacing local files. Its tracked tree contained no
+result files, so the existing local `results/` remain the numerical record;
+the merge contributes runnable experiment families and their provenance, not
+new unverified numbers. Useful additions include sector-resolved
+many-body/spin/charge gaps, dimerization-crossing dynamics, current and
+coherence observables, and SSH/single-hole/spinon-holon baselines. The partner
+FHS and cache implementations remain historical because the canonical code
+already contains the corrected twist orientation, Fraction cache reuse,
+Hermiticity checks, and residual checks used by `36.md`.
+
+See [`WORKFLOW.md`](WORKFLOW.md) for execution and audit rules, and
+[`experiments/README.md`](experiments/README.md) for entrypoints and output
+namespaces. Imported Slurm files are environment-specific templates and must
+be adapted before cluster submission.
 
 ## Installation
 
